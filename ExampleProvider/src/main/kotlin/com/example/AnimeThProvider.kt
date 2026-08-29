@@ -164,6 +164,7 @@ class AnimeThProvider : MainAPI() {
     ): Boolean {
         if (!data.startsWith("http")) return false
         var found = false
+
         val watchId = Regex("""/watch/([A-Za-z0-9]+)\.html""").find(data)?.groupValues?.get(1)
             ?: data.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
 
@@ -177,58 +178,57 @@ class AnimeThProvider : MainAPI() {
             .find(baseJs)?.groupValues?.get(1)?.trimEnd('/')
             ?: "https://streaming.tonytonychopper.com"
 
-        val playbackCodes = LinkedHashSet<String>()
-        Regex("""playback/[a-z]/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
-            playbackCodes.add(it.groupValues[1])
+        // Default server from switch_play(0): playback/v/CODE
+        val primaryCodes = LinkedHashSet<String>()
+        Regex("""playback/v/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
+            primaryCodes.add(it.groupValues[1])
         }
-        if (playbackCodes.isEmpty()) playbackCodes.add(watchId)
+        Regex("""playback/[a-z]/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
+            primaryCodes.add(it.groupValues[1])
+        }
+        if (primaryCodes.isEmpty()) primaryCodes.add(watchId)
 
-        val embedUrls = LinkedHashSet<String>()
-        for (code in playbackCodes) {
-            for (kind in listOf("v", "f", "e", "x", "y", "z", "b")) {
-                val playUrl = streamHost + "/playback/" + kind + "/" + code + "/"
-                try {
-                    val emb = app.get(playUrl, headers = headers + mapOf("Referer" to data)).document
-                    emb.select("iframe[src]").forEach { iframe ->
-                        val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
-                        if (src.startsWith("http")) embedUrls.add(src)
-                    }
-                    Regex("""https?://[^"'<>\s]+""").findAll(emb.html()).forEach { m ->
-                        val u = m.value
-                        if (u.contains("abysscdn") || u.contains("marimo") ||
-                            u.contains("tonytonychopper") || u.contains(".m3u8") || u.contains(".mp4")
-                        ) {
-                            embedUrls.add(u)
-                        }
-                    }
-                } catch (e: Exception) {
-                    // skip
-                }
+        // Only try a few servers (was 50+ requests before = endless loading)
+        val kinds = listOf("v", "f", "e")
+        val targets = ArrayList<String>()
+        for (code in primaryCodes.take(2)) {
+            for (kind in kinds) {
+                targets.add(streamHost + "/playback/" + kind + "/" + code + "/")
             }
         }
 
-        for (embed in embedUrls) {
+        val finalLinks = LinkedHashSet<String>()
+        for (playUrl in targets) {
+            try {
+                collectEmbeds(playUrl, data, finalLinks, 0)
+            } catch (e: Exception) {
+                // skip
+            }
+            if (finalLinks.any { it.contains("abysscdn") }) break
+        }
+
+        for (link in finalLinks) {
             when {
-                embed.contains(".m3u8") -> {
+                link.contains(".m3u8") -> {
                     callback.invoke(
                         ExtractorLink(
-                            name, "HLS", embed, mainUrl,
+                            name, "HLS", link, mainUrl,
                             Qualities.Unknown.value, true
                         )
                     )
                     found = true
                 }
-                embed.contains(".mp4") && !embed.contains("ibit.ly") -> {
+                link.contains(".mp4") && !link.contains("ibit.ly") -> {
                     callback.invoke(
                         ExtractorLink(
-                            name, "MP4", embed, mainUrl,
+                            name, "MP4", link, mainUrl,
                             Qualities.Unknown.value, false
                         )
                     )
                     found = true
                 }
                 else -> {
-                    if (loadExtractor(embed, data, subtitleCallback, callback)) {
+                    if (loadExtractor(link, data, subtitleCallback, callback)) {
                         found = true
                     }
                 }
@@ -239,5 +239,55 @@ class AnimeThProvider : MainAPI() {
             found = loadExtractor(data, mainUrl, subtitleCallback, callback)
         }
         return found
+    }
+
+    private suspend fun collectEmbeds(
+        url: String,
+        referer: String,
+        out: LinkedHashSet<String>,
+        depth: Int
+    ) {
+        if (depth > 3 || url.isBlank()) return
+        val doc = try {
+            app.get(url, headers = headers + mapOf("Referer" to referer)).document
+        } catch (e: Exception) {
+            return
+        }
+        val html = doc.html()
+
+        // Direct media
+        Regex("""https?://[^"'<>\s]+\.m3u8[^"'<>\s]*""").findAll(html).forEach { out.add(it.value) }
+        Regex("""https?://[^"'<>\s]+\.mp4[^"'<>\s]*""").findAll(html).forEach {
+            val u = it.value
+            if (!u.contains("ibit.ly") && !u.contains("ad")) out.add(u)
+        }
+
+        // Abyss (final public player used by this site)
+        Regex("""https?://(?:www\.)?abysscdn\.com/\?v=[A-Za-z0-9_-]+""").findAll(html).forEach {
+            out.add(it.value)
+        }
+
+        // iframes
+        doc.select("iframe[src]").forEach { iframe ->
+            var src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
+            if (!src.startsWith("http")) return@forEach
+            when {
+                src.contains("abysscdn") -> out.add(src)
+                src.contains("marimo") || src.contains("tonytonychopper") -> {
+                    out.add(src)
+                    collectEmbeds(src, url, out, depth + 1)
+                }
+                else -> out.add(src)
+            }
+        }
+
+        // marimo / tony links in raw html
+        Regex("""https?://(?:player\.marimo\.me|anime\.tonytonychopper\.net)[^"'<>\s]+""")
+            .findAll(html)
+            .forEach { m ->
+                val u = m.value
+                out.add(u)
+                if (depth < 2) collectEmbeds(u, url, out, depth + 1)
+            }
     }
 }
