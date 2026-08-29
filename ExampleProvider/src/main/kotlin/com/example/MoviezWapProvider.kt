@@ -4,9 +4,7 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
@@ -148,8 +146,9 @@ class MoviezWapProvider : MainAPI() {
                 t.contains("Genre", true) -> genres.addAll(
                     t.substringAfter(":").split(",").map { it.trim() }.filter { it.isNotBlank() }
                 )
-                t.contains("Release Date", true) ->
-                    year = year ?: Regex("(19|20)\d{2}").find(t)?.value?.toIntOrNull()
+                t.contains("Release Date", true) -> {
+                    year = year ?: Regex("(19|20)\\d{2}").find(t)?.value?.toIntOrNull()
+                }
                 t.contains("Category", true) -> {
                     val cat = t.substringAfter(":").trim()
                     if (cat.isNotBlank()) genres.add(cat)
@@ -189,20 +188,14 @@ class MoviezWapProvider : MainAPI() {
             val mp4 = resolveMp4(id, data) ?: continue
             val play = encodeMedia(mp4)
             callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = label.ifBlank { "MP4" },
-                    url = play,
-                    type = ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = mainUrl
-                    this.quality = qualityFromName(label.ifBlank { play })
-                    this.headers = mapOf(
-                        "User-Agent" to (uaMap["User-Agent"] ?: ""),
-                        "Accept" to "*/*",
-                        "Referer" to "$mainUrl/"
-                    )
-                }
+                ExtractorLink(
+                    name,
+                    label.ifBlank { "MP4" },
+                    play,
+                    mainUrl,
+                    qualityFromName(label.ifBlank { play }),
+                    false
+                )
             )
             found = true
         }
