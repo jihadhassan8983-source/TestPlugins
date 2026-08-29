@@ -60,9 +60,7 @@ class AnimeThProvider : MainAPI() {
         val out = ArrayList<SearchResponse>()
         val re2 = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"slug\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cover\"\\s*:\\s*\"([^\"]+)\"")
         re2.findAll(json).forEach { m ->
-            val title = m.groupValues[1]
-                .replace("\\\"", "\"")
-                .replace("\\/", "/")
+            val title = m.groupValues[1].replace("\\\"", "\"").replace("\\/", "/")
             val slug = m.groupValues[2]
             var cover = m.groupValues[3].replace("\\/", "/")
             if (!cover.startsWith("http")) cover = "$mainUrl/$cover"
@@ -114,7 +112,6 @@ class AnimeThProvider : MainAPI() {
             ?: doc.selectFirst("img[src*=uploads]")?.attr("src")
 
         val plot = doc.selectFirst("meta[name=description]")?.attr("content")
-
         val genres = doc.select("a[href*=/genre/]").map { it.text().trim() }.filter { it.isNotBlank() }
 
         val episodes = ArrayList<Episode>()
@@ -124,7 +121,7 @@ class AnimeThProvider : MainAPI() {
             val inList = a.className().contains("ep-item") || a.parents().any { it.id() == "ep-list" }
             if (!inList) return@forEach
             val epName = a.text().trim().ifBlank { "Episode" }
-            val epNum = Regex("(\\d+)").find(epName)?.groupValues?.get(1)?.toIntOrNull()
+            val epNum = Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
             episodes.add(
                 newEpisode(href) {
                     this.name = epName
@@ -167,7 +164,7 @@ class AnimeThProvider : MainAPI() {
     ): Boolean {
         if (!data.startsWith("http")) return false
         var found = false
-        val watchId = Regex("/watch/([A-Za-z0-9]+)\\.html").find(data)?.groupValues?.get(1)
+        val watchId = Regex("""/watch/([A-Za-z0-9]+)\.html""").find(data)?.groupValues?.get(1)
             ?: data.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
 
         val baseJs = try {
@@ -176,12 +173,12 @@ class AnimeThProvider : MainAPI() {
             ""
         }
 
-        val streamHost = Regex("webmainapp\\s*=\\s*['\"]([^'\"]+)['\"]")
+        val streamHost = Regex("""webmainapp\s*=\s*['"]([^'"]+)['"]""")
             .find(baseJs)?.groupValues?.get(1)?.trimEnd('/')
             ?: "https://streaming.tonytonychopper.com"
 
         val playbackCodes = LinkedHashSet<String>()
-        Regex("playback/[a-z]/([A-Za-z0-9]+)/").findAll(baseJs).forEach {
+        Regex("""playback/[a-z]/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
             playbackCodes.add(it.groupValues[1])
         }
         if (playbackCodes.isEmpty()) playbackCodes.add(watchId)
@@ -196,7 +193,7 @@ class AnimeThProvider : MainAPI() {
                         val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
                         if (src.startsWith("http")) embedUrls.add(src)
                     }
-                    Regex("https?://[^\"'<>\\s]+").findAll(emb.html()).forEach { m ->
+                    Regex("""https?://[^"'<>\s]+""").findAll(emb.html()).forEach { m ->
                         val u = m.value
                         if (u.contains("abysscdn") || u.contains("marimo") ||
                             u.contains("tonytonychopper") || u.contains(".m3u8") || u.contains(".mp4")
