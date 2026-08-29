@@ -12,12 +12,16 @@ class MoviezWapProvider : MainAPI() {
     override var mainUrl = "https://www.moviezwap.golf"
     override var name = "MoviezWap"
     override val hasMainPage = true
-    override var lang = "te"
+    override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
+    private val posterFallback get() = "$mainUrl/moviezwap.png"
+
     private val ua = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9"
     )
 
     override val mainPage = mainPageOf(
@@ -31,6 +35,13 @@ class MoviezWapProvider : MainAPI() {
     private fun headers(referer: String = "$mainUrl/") =
         ua + mapOf("Referer" to referer)
 
+    private fun absUrl(raw: String): String {
+        val h = raw.trim()
+        if (h.startsWith("http")) return h
+        if (h.startsWith("/")) return mainUrl + h
+        return "$mainUrl/$h"
+    }
+
     private fun pagedCategory(url: String, page: Int): String {
         if (page <= 1) return url
         return url.replace(".html", "/$page.html")
@@ -38,13 +49,14 @@ class MoviezWapProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (request.data == "$mainUrl/" || request.data == "$mainUrl") {
-            if (page > 1) return newHomePageResponse(request.name, emptyList())
+            if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
             request.data
         } else {
             pagedCategory(request.data, page)
         }
         val doc = app.get(url, headers = headers()).document
-        return newHomePageResponse(request.name, parseList(doc))
+        val list = parseList(doc)
+        return newHomePageResponse(request.name, list, list.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -55,22 +67,38 @@ class MoviezWapProvider : MainAPI() {
 
     private fun parseList(doc: Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
-        doc.select("a[href*=/movie/]").forEach { a ->
-            var href = a.attr("abs:href")
-            if (href.contains("/movie//movie/")) {
-                href = href.replace("/movie//movie/", "/movie/")
-            }
-            if (!href.contains("/movie/") || !href.endsWith(".html")) return@forEach
-            if (href.substringAfter("/movie/").isBlank()) return@forEach
-            val title = a.text().replace(Regex("<[^>]+>"), "").trim()
-            if (title.isBlank() || title.equals("Home", true)) return@forEach
+
+        fun addItem(rawHref: String, rawTitle: String, poster: String?) {
+            var href = absUrl(rawHref).replace("/movie//movie/", "/movie/")
+            if (!href.contains("/movie/") || !href.contains(".html")) return
+            val slug = href.substringAfter("/movie/").substringBefore("?")
+            if (slug.isBlank() || slug == ".html") return
+            val title = rawTitle.replace(Regex("\\s+"), " ").trim()
+            if (title.isBlank() || title.equals("Home", true)) return
             val year = Regex("\\((\\d{4})\\)").find(title)?.groupValues?.get(1)?.toIntOrNull()
             out.add(
                 newMovieSearchResponse(title, href, TvType.Movie) {
                     this.year = year
+                    this.posterUrl = poster ?: posterFallback
                 }
             )
         }
+
+        doc.select("a[href]").forEach { a ->
+            val href = a.attr("href")
+            if (!href.contains("/movie/")) return@forEach
+            val poster = a.selectFirst("img")?.attr("src")?.let { absUrl(it) }
+            addItem(href, a.text(), poster)
+        }
+
+        if (out.isEmpty()) {
+            val html = doc.html()
+            Regex("""href=['"]([^'"]*/movie/[^'"]+\.html)['"][^>]*>([\s\S]*?)</a>""").findAll(html).forEach { m ->
+                val title = m.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
+                addItem(m.groupValues[1], title, null)
+            }
+        }
+
         return out.distinctBy { it.url }
     }
 
@@ -82,15 +110,10 @@ class MoviezWapProvider : MainAPI() {
             ?.trim()
             ?: url.substringAfterLast("/").removeSuffix(".html").replace("-", " ")
 
-        val posterPath = doc.selectFirst("img[src*=/poster/]")?.attr("src")
-        val poster = when {
-            posterPath.isNullOrBlank() -> null
-            posterPath.startsWith("http") -> posterPath
-            else -> mainUrl + posterPath
-        }
+        val posterPath = doc.selectFirst("img[src*=poster]")?.attr("src")
+        val poster = if (posterPath.isNullOrBlank()) posterFallback else absUrl(posterPath)
 
         var year: Int? = Regex("\\((\\d{4})\\)").find(title)?.groupValues?.get(1)?.toIntOrNull()
-        var plot: String? = null
         val genres = ArrayList<String>()
 
         doc.select("div.movie").forEach { row ->
@@ -111,8 +134,8 @@ class MoviezWapProvider : MainAPI() {
             }
         }
 
-        val files = doc.select("a[href*=dwload.php?file=]")
-        plot = files.joinToString(" | ") { it.text().trim() }.ifBlank { null }
+        val files = doc.select("a[href*=dwload.php]")
+        val plot = files.joinToString(" | ") { it.text().trim() }.ifBlank { null }
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
@@ -131,24 +154,27 @@ class MoviezWapProvider : MainAPI() {
     ): Boolean {
         if (!data.startsWith("http")) return false
         val doc = app.get(data, headers = headers(data)).document
-        val fileIds = doc.select("a[href*=dwload.php?file=]").mapNotNull { a ->
-            val href = a.attr("href")
-            val id = Regex("file=(\\d+)").find(href)?.groupValues?.get(1)
-            val label = a.text().trim()
-            if (id != null) id to label else null
-        }.distinctBy { it.first }
+        val fileIds = LinkedHashMap<String, String>()
+        doc.select("a[href*=dwload.php]").forEach { a ->
+            val id = Regex("file=(\\d+)").find(a.attr("href"))?.groupValues?.get(1) ?: return@forEach
+            fileIds[id] = a.text().trim()
+        }
+        if (fileIds.isEmpty()) {
+            Regex("dwload\\.php\\?file=(\\d+)").findAll(doc.html()).forEach { m ->
+                fileIds.putIfAbsent(m.groupValues[1], "File ${m.groupValues[1]}")
+            }
+        }
 
         var found = false
         for ((id, label) in fileIds) {
             val mp4 = resolveMp4(id, data) ?: continue
-            val q = qualityFromName(label.ifBlank { mp4 })
             callback.invoke(
                 ExtractorLink(
                     name,
                     label.ifBlank { "MP4" },
                     mp4,
                     mainUrl,
-                    q,
+                    qualityFromName(label.ifBlank { mp4 }),
                     false
                 )
             )
@@ -158,12 +184,10 @@ class MoviezWapProvider : MainAPI() {
     }
 
     private suspend fun resolveMp4(fileId: String, referer: String): String? {
-        val dw = app.get(
-            "$mainUrl/dwload.php?file=$fileId",
-            headers = headers(referer)
-        ).document
-        dw.select("a[href*=download.php?file=]").firstOrNull()?.attr("abs:href")?.let { next ->
-            val dl = app.get(next, headers = headers("$mainUrl/dwload.php?file=$fileId")).document
+        val dw = app.get("$mainUrl/dwload.php?file=$fileId", headers = headers(referer)).document
+        val next = dw.select("a[href*=download.php]").firstOrNull()?.attr("href")
+        if (!next.isNullOrBlank()) {
+            val dl = app.get(absUrl(next), headers = headers("$mainUrl/dwload.php?file=$fileId")).document
             findMp4(dl)?.let { return it }
         }
         findMp4(dw)?.let { return it }
@@ -176,11 +200,10 @@ class MoviezWapProvider : MainAPI() {
 
     private fun findMp4(doc: Document): String? {
         doc.select("a[href]").forEach { a ->
-            val href = a.attr("abs:href").ifBlank { a.attr("href") }
+            val href = absUrl(a.attr("href"))
             if (href.contains(".mp4", true) && href.startsWith("http")) return href
         }
-        val html = doc.html()
-        return Regex("""https?://[^"'<>\s]+\.mp4[^"'<>\s]*""").find(html)?.value
+        return Regex("""https?://[^"'<>\s]+\.mp4[^"'<>\s]*""").find(doc.html())?.value
     }
 
     private fun qualityFromName(name: String): Int {
