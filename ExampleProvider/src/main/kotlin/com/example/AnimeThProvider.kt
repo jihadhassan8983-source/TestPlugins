@@ -58,11 +58,11 @@ class AnimeThProvider : MainAPI() {
         }
 
         val out = ArrayList<SearchResponse>()
-        val re = Regex(""""slug"\s*:\s*"([^"]+)".*?"title"\s*:\s*"([^"]+)"""")
-        // JSON field order on site: title, slug, cover
-        val re2 = Regex(""""title"\s*:\s*"([^"]+)"\s*,\s*"slug"\s*:\s*"([^"]+)"\s*,\s*"cover"\s*:\s*"([^"]+)"""")
+        val re2 = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"slug\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cover\"\\s*:\\s*\"([^\"]+)\"")
         re2.findAll(json).forEach { m ->
-            val title = decodeJson(m.groupValues[1])
+            val title = m.groupValues[1]
+                .replace("\\\"", "\"")
+                .replace("\\/", "/")
             val slug = m.groupValues[2]
             var cover = m.groupValues[3].replace("\\/", "/")
             if (!cover.startsWith("http")) cover = "$mainUrl/$cover"
@@ -76,19 +76,6 @@ class AnimeThProvider : MainAPI() {
 
         val doc = app.get("$mainUrl/search/?s=$q", headers = headers).document
         return parseCards(doc)
-    }
-
-    private fun decodeJson(s: String): String {
-        return try {
-            s.replace("\\u", "\\u")
-                .replace(Regex("""\\u([0-9a-fA-F]{4})""")) {
-                    it.groupValues[1].toInt(16).toChar().toString()
-                }
-                .replace("\\\"", "\"")
-                .replace("\\/", "/")
-        } catch (e: Exception) {
-            s
-        }
     }
 
     private fun parseCards(doc: Document): List<SearchResponse> {
@@ -134,13 +121,10 @@ class AnimeThProvider : MainAPI() {
         doc.select("a[href*=/watch/]").forEach { a ->
             val href = a.attr("abs:href")
             if (!href.contains("/watch/")) return@forEach
-            if (!a.classNames().contains("ep-item") && a.parent()?.id() != "ep-list") {
-                // still allow #ep-list children
-                val inList = a.parents().any { it.id() == "ep-list" }
-                if (!inList && !a.className().contains("ep-item")) return@forEach
-            }
+            val inList = a.className().contains("ep-item") || a.parents().any { it.id() == "ep-list" }
+            if (!inList) return@forEach
             val epName = a.text().trim().ifBlank { "Episode" }
-            val epNum = Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
+            val epNum = Regex("(\\d+)").find(epName)?.groupValues?.get(1)?.toIntOrNull()
             episodes.add(
                 newEpisode(href) {
                     this.name = epName
@@ -149,7 +133,6 @@ class AnimeThProvider : MainAPI() {
             )
         }
 
-        // fallback: all /watch/ links on page
         if (episodes.isEmpty()) {
             doc.select("a[href*=/watch/]").forEach { a ->
                 val href = a.attr("abs:href")
@@ -184,7 +167,7 @@ class AnimeThProvider : MainAPI() {
     ): Boolean {
         if (!data.startsWith("http")) return false
         var found = false
-        val watchId = Regex("""/watch/([A-Za-z0-9]+)\.html""").find(data)?.groupValues?.get(1)
+        val watchId = Regex("/watch/([A-Za-z0-9]+)\\.html").find(data)?.groupValues?.get(1)
             ?: data.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
 
         val baseJs = try {
@@ -193,12 +176,12 @@ class AnimeThProvider : MainAPI() {
             ""
         }
 
-        val streamHost = Regex("""webmainapp\s*=\s*['"]([^'"]+)['"]""")
+        val streamHost = Regex("webmainapp\\s*=\\s*['\"]([^'\"]+)['\"]")
             .find(baseJs)?.groupValues?.get(1)?.trimEnd('/')
             ?: "https://streaming.tonytonychopper.com"
 
         val playbackCodes = LinkedHashSet<String>()
-        Regex("""playback/[a-z]/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
+        Regex("playback/[a-z]/([A-Za-z0-9]+)/").findAll(baseJs).forEach {
             playbackCodes.add(it.groupValues[1])
         }
         if (playbackCodes.isEmpty()) playbackCodes.add(watchId)
@@ -213,7 +196,7 @@ class AnimeThProvider : MainAPI() {
                         val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
                         if (src.startsWith("http")) embedUrls.add(src)
                     }
-                    Regex("""https?://[^"'<>\s]+""").findAll(emb.html()).forEach { m ->
+                    Regex("https?://[^\"'<>\\s]+").findAll(emb.html()).forEach { m ->
                         val u = m.value
                         if (u.contains("abysscdn") || u.contains("marimo") ||
                             u.contains("tonytonychopper") || u.contains(".m3u8") || u.contains(".mp4")
@@ -260,4 +243,4 @@ class AnimeThProvider : MainAPI() {
         }
         return found
     }
-                        }
+}
