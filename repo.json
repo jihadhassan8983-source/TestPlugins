@@ -1,0 +1,8 @@
+{
+  "name": "MoviezWap",
+  "description": "MoviezWap Telugu Tamil Hindi",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/jihadhassan8983-source/TestPlugins/builds/plugins.json"
+  ]
+}
