@@ -21,22 +21,22 @@ class AnimeThProvider : MainAPI() {
         "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "th-TH,th;q=0.9,en;q=0.8",
-        "Referer" to "$mainUrl/"
+        "Referer" to (mainUrl + "/")
     )
 
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Home",
-        "$mainUrl/scoretop/" to "Top Score"
+        (mainUrl + "/") to "Home",
+        (mainUrl + "/scoretop/") to "Top Score"
     )
 
     private fun pageUrl(base: String, page: Int): String {
         if (page <= 1) return base
         val root = base.trimEnd('/')
-        return if (root == mainUrl || root == "$mainUrl/") root else "$root/page/$page/"
+        return if (root == mainUrl || root == mainUrl + "/") root else root + "/page/" + page + "/"
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (request.data == "$mainUrl/" || request.data == mainUrl) {
+        val url = if (request.data == mainUrl + "/" || request.data == mainUrl) {
             if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
             request.data
         } else {
@@ -50,7 +50,7 @@ class AnimeThProvider : MainAPI() {
         val q = URLEncoder.encode(query, "UTF-8")
         val json = try {
             app.get(
-                "$mainUrl/vendor/search-ajax.php?q=$q",
+                mainUrl + "/vendor/search-ajax.php?q=" + q,
                 headers = headers + mapOf("X-Requested-With" to "XMLHttpRequest")
             ).text
         } catch (e: Exception) {
@@ -63,16 +63,16 @@ class AnimeThProvider : MainAPI() {
             val title = m.groupValues[1].replace("\\\"", "\"").replace("\\/", "/")
             val slug = m.groupValues[2]
             var cover = m.groupValues[3].replace("\\/", "/")
-            if (!cover.startsWith("http")) cover = "$mainUrl/$cover"
+            if (!cover.startsWith("http")) cover = mainUrl + "/" + cover
             out.add(
-                newAnimeSearchResponse(title, "$mainUrl/anime/$slug/", TvType.Anime) {
+                newAnimeSearchResponse(title, mainUrl + "/anime/" + slug + "/", TvType.Anime) {
                     this.posterUrl = cover
                 }
             )
         }
         if (out.isNotEmpty()) return out.distinctBy { it.url }
 
-        val doc = app.get("$mainUrl/search/?s=$q", headers = headers).document
+        val doc = app.get(mainUrl + "/search/?s=" + q, headers = headers).document
         return parseCards(doc)
     }
 
@@ -91,7 +91,7 @@ class AnimeThProvider : MainAPI() {
                 ?: a.selectFirst("img")?.attr("src")
             if (poster != null && poster.startsWith("data:")) poster = null
             if (poster != null && !poster.startsWith("http")) {
-                poster = "\( mainUrl/ \){poster.trimStart('/')}"
+                poster = mainUrl + "/" + poster.trimStart('/')
             }
             out.add(
                 newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -103,7 +103,7 @@ class AnimeThProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = headers + mapOf("Referer" to "$mainUrl/")).document
+        val doc = app.get(url, headers = headers + mapOf("Referer" to (mainUrl + "/"))).document
         val title = doc.selectFirst("h1")?.text()?.trim()
             ?: doc.selectFirst("title")?.text()?.substringBefore(" - ")?.trim()
             ?: url.trimEnd('/').substringAfterLast('/')
@@ -168,7 +168,7 @@ class AnimeThProvider : MainAPI() {
             ?: data.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
 
         val baseJs = try {
-            app.get("$mainUrl/base/$watchId/", headers = headers + mapOf("Referer" to data)).text
+            app.get(mainUrl + "/base/" + watchId + "/", headers = headers + mapOf("Referer" to data)).text
         } catch (e: Exception) {
             ""
         }
@@ -186,7 +186,7 @@ class AnimeThProvider : MainAPI() {
         val embedUrls = LinkedHashSet<String>()
         for (code in playbackCodes) {
             for (kind in listOf("v", "f", "e", "x", "y", "z", "b")) {
-                val playUrl = "$streamHost/playback/$kind/$code/"
+                val playUrl = streamHost + "/playback/" + kind + "/" + code + "/"
                 try {
                     val emb = app.get(playUrl, headers = headers + mapOf("Referer" to data)).document
                     emb.select("iframe[src]").forEach { iframe ->
