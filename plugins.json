@@ -1,0 +1,23 @@
+[
+    {
+        "iconUrl": "https://www.moviezwap.golf/images/favicon.ico",
+        "fileHash": "sha256-059c7a0c79e5091ae15563220601803c47977be02c2629faf7e65ad467f4ceca",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/jihadhassan8983-source/TestPlugins",
+        "fileSize": 19981,
+        "status": 1,
+        "language": "te",
+        "authors": [
+            "jihadhassan8983-source"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "ExampleProvider",
+        "description": "MoviezWap Telugu Tamil Hindi movies",
+        "url": "https://raw.githubusercontent.com/jihadhassan8983-source/TestPlugins/builds/ExampleProvider.cs3",
+        "name": "ExampleProvider"
+    }
+]
