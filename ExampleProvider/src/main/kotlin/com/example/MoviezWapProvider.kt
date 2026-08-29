@@ -16,8 +16,6 @@ class MoviezWapProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
-    private val posterFallback get() = "$mainUrl/moviezwap.png"
-
     private val ua = mapOf(
         "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -40,6 +38,30 @@ class MoviezWapProvider : MainAPI() {
         if (h.startsWith("http")) return h
         if (h.startsWith("/")) return mainUrl + h
         return "$mainUrl/$h"
+    }
+
+    private fun cleanTitle(text: String): String {
+        return text.replace('\u00bb', ' ')
+            .replace("*", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun posterGuess(movieUrl: String): String {
+        val slug = movieUrl.substringAfterLast("/")
+            .substringBefore(".html")
+            .lowercase()
+            .replace("(", "")
+            .replace(")", "")
+            .replace(" ", "-")
+        return "$mainUrl/poster/$slug.jpg"
+    }
+
+    private fun encodeMedia(url: String): String {
+        val q = url.indexOf('?')
+        val path = if (q >= 0) url.substring(0, q) else url
+        val query = if (q >= 0) url.substring(q) else ""
+        return path.replace(" ", "%20") + query
     }
 
     private fun pagedCategory(url: String, page: Int): String {
@@ -68,18 +90,18 @@ class MoviezWapProvider : MainAPI() {
     private fun parseList(doc: Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
 
-        fun addItem(rawHref: String, rawTitle: String, poster: String?) {
+        fun addItem(rawHref: String, rawTitle: String) {
             var href = absUrl(rawHref).replace("/movie//movie/", "/movie/")
             if (!href.contains("/movie/") || !href.contains(".html")) return
             val slug = href.substringAfter("/movie/").substringBefore("?")
             if (slug.isBlank() || slug == ".html") return
-            val title = rawTitle.replace(Regex("\\s+"), " ").trim()
+            val title = cleanTitle(rawTitle)
             if (title.isBlank() || title.equals("Home", true)) return
             val year = Regex("\\((\\d{4})\\)").find(title)?.groupValues?.get(1)?.toIntOrNull()
             out.add(
                 newMovieSearchResponse(title, href, TvType.Movie) {
                     this.year = year
-                    this.posterUrl = poster ?: posterFallback
+                    this.posterUrl = posterGuess(href)
                 }
             )
         }
@@ -87,35 +109,34 @@ class MoviezWapProvider : MainAPI() {
         doc.select("a[href]").forEach { a ->
             val href = a.attr("href")
             if (!href.contains("/movie/")) return@forEach
-            val poster = a.selectFirst("img")?.attr("src")?.let { absUrl(it) }
-            addItem(href, a.text(), poster)
+            addItem(href, a.text())
         }
 
         if (out.isEmpty()) {
-            val html = doc.html()
-            Regex("""href=['"]([^'"]*/movie/[^'"]+\.html)['"][^>]*>([\s\S]*?)</a>""").findAll(html).forEach { m ->
-                val title = m.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
-                addItem(m.groupValues[1], title, null)
-            }
+            Regex("""href=['"]([^'"]*/movie/[^'"]+\.html)['"][^>]*>([\s\S]*?)</a>""")
+                .findAll(doc.html())
+                .forEach { m ->
+                    addItem(m.groupValues[1], m.groupValues[2].replace(Regex("<[^>]+>"), ""))
+                }
         }
-
         return out.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = headers(url)).document
-        val title = doc.selectFirst("title")?.text()
-            ?.substringBefore("HDRip")
-            ?.substringBefore("Full Movie")
-            ?.trim()
-            ?: url.substringAfterLast("/").removeSuffix(".html").replace("-", " ")
+        val title = cleanTitle(
+            doc.selectFirst("title")?.text()
+                ?.substringBefore("HDRip")
+                ?.substringBefore("Full Movie")
+                ?.trim()
+                ?: url.substringAfterLast("/").removeSuffix(".html").replace("-", " ")
+        )
 
         val posterPath = doc.selectFirst("img[src*=poster]")?.attr("src")
-        val poster = if (posterPath.isNullOrBlank()) posterFallback else absUrl(posterPath)
+        val poster = if (posterPath.isNullOrBlank()) posterGuess(url) else absUrl(posterPath)
 
         var year: Int? = Regex("\\((\\d{4})\\)").find(title)?.groupValues?.get(1)?.toIntOrNull()
         val genres = ArrayList<String>()
-
         doc.select("div.movie").forEach { row ->
             val t = row.text()
             when {
@@ -168,13 +189,14 @@ class MoviezWapProvider : MainAPI() {
         var found = false
         for ((id, label) in fileIds) {
             val mp4 = resolveMp4(id, data) ?: continue
+            val play = encodeMedia(mp4)
             callback.invoke(
                 ExtractorLink(
                     name,
                     label.ifBlank { "MP4" },
-                    mp4,
+                    play,
                     mainUrl,
-                    qualityFromName(label.ifBlank { mp4 }),
+                    qualityFromName(label.ifBlank { play }),
                     false
                 )
             )
@@ -200,10 +222,11 @@ class MoviezWapProvider : MainAPI() {
 
     private fun findMp4(doc: Document): String? {
         doc.select("a[href]").forEach { a ->
-            val href = absUrl(a.attr("href"))
+            val href = a.attr("href")
             if (href.contains(".mp4", true) && href.startsWith("http")) return href
         }
-        return Regex("""https?://[^"'<>\s]+\.mp4[^"'<>\s]*""").find(doc.html())?.value
+        return Regex("""https?://[^"'<>]+\.mp4[^"'<>]*""").find(doc.html())?.value
+            ?.replace("&amp;", "&")
     }
 
     private fun qualityFromName(name: String): Int {
