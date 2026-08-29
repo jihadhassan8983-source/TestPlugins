@@ -1,22 +1,22 @@
 [
     {
-        "iconUrl": "https://www.moviezwap.golf/images/favicon.ico",
-        "fileHash": "sha256-6481c54e83d0a71c26ea01d3cffe2fdedf01ad81a547073cea6b4ebab1e1bd4c",
+        "iconUrl": "https://anime-th.com/assets/image/screen.jpg",
+        "fileHash": "sha256-d1e42ecef42d2d71ba1e991a027c9e5e46560c66ac6a8bf836dd540a23293bfd",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/jihadhassan8983-source/TestPlugins",
-        "fileSize": 21299,
+        "fileSize": 32994,
         "status": 1,
-        "language": "te",
+        "language": "th",
         "authors": [
             "jihadhassan8983-source"
         ],
         "tvTypes": [
-            "Movie",
-            "TvSeries"
+            "Anime",
+            "AnimeMovie"
         ],
         "version": 1,
         "internalName": "ExampleProvider",
-        "description": "MoviezWap Telugu Tamil Hindi movies",
+        "description": "Anime-TH Thai sub and dub anime",
         "url": "https://raw.githubusercontent.com/jihadhassan8983-source/TestPlugins/builds/ExampleProvider.cs3",
         "name": "ExampleProvider"
     }
