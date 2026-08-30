@@ -9,5 +9,6 @@ class ExamplePlugin : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(AnimeThProvider())
         registerMainAPI(AnimeHDProvider())
+        registerMainAPI(AnimeSaltProvider())
     }
 }
