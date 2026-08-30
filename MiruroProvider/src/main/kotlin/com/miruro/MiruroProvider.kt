@@ -2,9 +2,6 @@ package com.miruro
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 
@@ -79,11 +76,11 @@ class MiruroProvider : MainAPI() {
             newAnimeSearchResponse(title, "$mainUrl/watch?id=$id", type) {
                 this.posterUrl = poster
                 this.year = media.seasonYear
-                addDubStatus(dubExist = true, subExist = true)
+                this.dubStatus = setOf(DubStatus.Subbed, DubStatus.Dubbed)
             }
         } ?: emptyList()
 
-        return newHomePageResponse(request.name, animeList, hasNext = animeList.isNotEmpty())
+        return newHomePageResponse(request, animeList, hasNext = animeList.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -133,7 +130,7 @@ class MiruroProvider : MainAPI() {
             newAnimeSearchResponse(title, "$mainUrl/watch?id=$id", type) {
                 this.posterUrl = poster
                 this.year = media.seasonYear
-                addDubStatus(dubExist = true, subExist = true)
+                this.dubStatus = setOf(DubStatus.Subbed, DubStatus.Dubbed)
             }
         } ?: emptyList()
     }
@@ -227,8 +224,10 @@ class MiruroProvider : MainAPI() {
             this.tags = media.genres ?: emptyList()
             this.rating = media.averageScore
             this.showStatus = showStatus
-            media.idMal?.let { addMalId(it) }
-            addAniListId(id)
+            this.syncData = mapOf(
+                "anilist" to "$id",
+                "mal" to "${media.idMal ?: ""}"
+            )
             addEpisodes(DubStatus.Subbed, subEpisodes)
             addEpisodes(DubStatus.Dubbed, dubEpisodes)
         }
@@ -263,64 +262,78 @@ class MiruroProvider : MainAPI() {
                         "Referer" to "$mainUrl/"
                     ),
                     timeout = 10
-                )
+                ).parsedSafe<StreamApiResponse>()
 
-                if (response.isSuccessful) {
-                    val body = response.text
-                    val json = parseJson<Map<String, Any>>(body)
+                val videoUrl = response?.videoUrl
+                    ?: response?.url
+                    ?: response?.data?.videoUrl
+                    ?: response?.data?.url
 
-                    val videoUrl = (json["video_url"] as? String)
-                        ?: (json["url"] as? String)
-                        ?: ((json["data"] as? Map<*, *>)?.get("video_url") as? String)
-                        ?: ((json["results"] as? Map<*, *>)?.get("url") as? String)
+                val referer = response?.headers?.get("Referer")
+                    ?: response?.data?.headers?.get("Referer")
+                    ?: "$mainUrl/"
 
-                    val referer = (json["headers"] as? Map<*, *>)?.get("Referer") as? String
-                        ?: ((json["data"] as? Map<*, *>)?.get("headers") as? Map<*, *>)?.get("Referer") as? String
-                        ?: "$mainUrl/"
+                if (!videoUrl.isNullOrEmpty()) {
+                    val isM3u8 = videoUrl.contains(".m3u8") || response?.format == "hls"
 
-                    if (!videoUrl.isNullOrEmpty()) {
-                        val isM3u8 = videoUrl.contains(".m3u8") || (json["format"] as? String) == "hls"
-
-                        callback.invoke(
-                            ExtractorLink(
-                                source = name,
-                                name = "$name Server",
-                                url = videoUrl,
-                                referer = referer,
-                                quality = Qualities.P1080.value,
-                                isM3u8 = isM3u8,
-                                headers = mapOf(
-                                    "Referer" to referer,
-                                    "User-Agent" to USER_AGENT
-                                )
+                    callback.invoke(
+                        ExtractorLink(
+                            source = name,
+                            name = "$name Server",
+                            url = videoUrl,
+                            referer = referer,
+                            quality = Qualities.P1080.value,
+                            isM3u8 = isM3u8,
+                            headers = mapOf(
+                                "Referer" to referer,
+                                "User-Agent" to USER_AGENT
                             )
                         )
-                        linkFound = true
-                    }
-
-                    val subtitles = (json["subtitles"] as? List<*>)
-                        ?: ((json["data"] as? Map<*, *>)?.get("subtitles") as? List<*>)
-
-                    subtitles?.forEach { subItem ->
-                        if (subItem is Map<*, *>) {
-                            val subUrl = subItem["url"] as? String ?: subItem["file"] as? String
-                            val subLang = subItem["lang"] as? String ?: subItem["label"] as? String ?: "English"
-                            if (!subUrl.isNullOrEmpty()) {
-                                subtitleCallback.invoke(
-                                    SubtitleFile(subLang, subUrl)
-                                )
-                            }
-                        }
-                    }
-
-                    if (linkFound) break
+                    )
+                    linkFound = true
                 }
+
+                val subs = response?.subtitles ?: response?.data?.subtitles
+                subs?.forEach { subItem ->
+                    val subUrl = subItem.url ?: subItem.file
+                    val subLang = subItem.lang ?: subItem.label ?: "English"
+                    if (!subUrl.isNullOrEmpty()) {
+                        subtitleCallback.invoke(
+                            SubtitleFile(subLang, subUrl)
+                        )
+                    }
+                }
+
+                if (linkFound) break
             } catch (_: Exception) {
             }
         }
 
         return linkFound
     }
+
+    data class StreamApiResponse(
+        @JsonProperty("video_url") val videoUrl: String? = null,
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("format") val format: String? = null,
+        @JsonProperty("headers") val headers: Map<String, String>? = null,
+        @JsonProperty("subtitles") val subtitles: List<StreamSubtitle>? = null,
+        @JsonProperty("data") val data: StreamData? = null
+    )
+
+    data class StreamData(
+        @JsonProperty("video_url") val videoUrl: String? = null,
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("headers") val headers: Map<String, String>? = null,
+        @JsonProperty("subtitles") val subtitles: List<StreamSubtitle>? = null
+    )
+
+    data class StreamSubtitle(
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("file") val file: String? = null,
+        @JsonProperty("lang") val lang: String? = null,
+        @JsonProperty("label") val label: String? = null
+    )
 
     data class AniListResponse(
         @JsonProperty("data") val data: AniListData? = null
