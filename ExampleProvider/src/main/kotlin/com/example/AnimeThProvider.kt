@@ -5,7 +5,6 @@ package com.example
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
@@ -19,7 +18,7 @@ class AnimeThProvider : MainAPI() {
 
     private val headers = mapOf(
         "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept" to "*/*",
         "Accept-Language" to "th-TH,th;q=0.9,en;q=0.8",
         "Referer" to (mainUrl + "/")
     )
@@ -163,13 +162,15 @@ class AnimeThProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (!data.startsWith("http")) return false
-        var found = false
 
         val watchId = Regex("""/watch/([A-Za-z0-9]+)\.html""").find(data)?.groupValues?.get(1)
             ?: data.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
 
         val baseJs = try {
-            app.get(mainUrl + "/base/" + watchId + "/", headers = headers + mapOf("Referer" to data)).text
+            app.get(
+                mainUrl + "/base/" + watchId + "/",
+                headers = headers + mapOf("Referer" to data)
+            ).text
         } catch (e: Exception) {
             ""
         }
@@ -178,116 +179,103 @@ class AnimeThProvider : MainAPI() {
             .find(baseJs)?.groupValues?.get(1)?.trimEnd('/')
             ?: "https://streaming.tonytonychopper.com"
 
-        // Default server from switch_play(0): playback/v/CODE
-        val primaryCodes = LinkedHashSet<String>()
+        // Default: switch_play(0) -> playback/v/CODE
+        val playCodes = LinkedHashSet<String>()
         Regex("""playback/v/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
-            primaryCodes.add(it.groupValues[1])
+            playCodes.add(it.groupValues[1])
         }
-        Regex("""playback/[a-z]/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
-            primaryCodes.add(it.groupValues[1])
-        }
-        if (primaryCodes.isEmpty()) primaryCodes.add(watchId)
-
-        // Only try a few servers (was 50+ requests before = endless loading)
-        val kinds = listOf("v", "f", "e")
-        val targets = ArrayList<String>()
-        for (code in primaryCodes.take(2)) {
-            for (kind in kinds) {
-                targets.add(streamHost + "/playback/" + kind + "/" + code + "/")
+        if (playCodes.isEmpty()) {
+            Regex("""playback/[a-z]/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
+                playCodes.add(it.groupValues[1])
             }
         }
+        if (playCodes.isEmpty()) playCodes.add(watchId)
 
-        val finalLinks = LinkedHashSet<String>()
-        for (playUrl in targets) {
-            try {
-                collectEmbeds(playUrl, data, finalLinks, 0)
-            } catch (e: Exception) {
-                // skip
-            }
-            if (finalLinks.any { it.contains("abysscdn") }) break
-        }
+        var found = false
+        for (code in playCodes) {
+            val playUrl = streamHost + "/playback/v/" + code + "/"
+            val streamIds = extractTonyIds(playUrl, data)
+            for (sid in streamIds) {
+                // Master HLS
+                val master = "https://anime.tonytonychopper.net/file2/" + sid + "/"
+                callback.invoke(
+                    ExtractorLink(
+                        name,
+                        "Auto",
+                        master,
+                        "https://anime.tonytonychopper.net/",
+                        Qualities.Unknown.value,
+                        true
+                    )
+                )
+                found = true
 
-        for (link in finalLinks) {
-            when {
-                link.contains(".m3u8") -> {
+                // Quality playlists
+                for ((qName, qVal) in listOf(
+                    "1080" to Qualities.P1080.value,
+                    "720" to Qualities.P720.value,
+                    "480" to Qualities.P480.value,
+                    "360" to Qualities.P360.value
+                )) {
+                    val qUrl = "https://anime.tonytonychopper.net/quality2/" + sid + "/" + qName + "/"
                     callback.invoke(
                         ExtractorLink(
-                            name, "HLS", link, mainUrl,
-                            Qualities.Unknown.value, true
+                            name,
+                            qName + "p",
+                            qUrl,
+                            "https://anime.tonytonychopper.net/",
+                            qVal,
+                            true
+                        )
+                    )
+                }
+            }
+            if (found) break
+
+            // Fallback other playback kinds once
+            for (kind in listOf("f", "e")) {
+                val alt = streamHost + "/playback/" + kind + "/" + code + "/"
+                val ids = extractTonyIds(alt, data)
+                for (sid in ids) {
+                    val master = "https://anime.tonytonychopper.net/file2/" + sid + "/"
+                    callback.invoke(
+                        ExtractorLink(
+                            name,
+                            "Server " + kind,
+                            master,
+                            "https://anime.tonytonychopper.net/",
+                            Qualities.Unknown.value,
+                            true
                         )
                     )
                     found = true
                 }
-                link.contains(".mp4") && !link.contains("ibit.ly") -> {
-                    callback.invoke(
-                        ExtractorLink(
-                            name, "MP4", link, mainUrl,
-                            Qualities.Unknown.value, false
-                        )
-                    )
-                    found = true
-                }
-                else -> {
-                    if (loadExtractor(link, data, subtitleCallback, callback)) {
-                        found = true
-                    }
-                }
+                if (found) break
             }
+            if (found) break
         }
 
-        if (!found) {
-            found = loadExtractor(data, mainUrl, subtitleCallback, callback)
-        }
         return found
     }
 
-    private suspend fun collectEmbeds(
-        url: String,
-        referer: String,
-        out: LinkedHashSet<String>,
-        depth: Int
-    ) {
-        if (depth > 3 || url.isBlank()) return
-        val doc = try {
-            app.get(url, headers = headers + mapOf("Referer" to referer)).document
+    private suspend fun extractTonyIds(playUrl: String, referer: String): List<String> {
+        val ids = LinkedHashSet<String>()
+        try {
+            val html = app.get(
+                playUrl,
+                headers = headers + mapOf("Referer" to referer)
+            ).text
+            // iframe src="https://anime.tonytonychopper.net/v2/XXXX"
+            Regex("""anime\.tonytonychopper\.net/v2/([A-Za-z0-9]+)""").findAll(html).forEach {
+                ids.add(it.groupValues[1])
+            }
+            // also any /v2/ id
+            Regex("""/v2/([A-Za-z0-9]+)""").findAll(html).forEach {
+                ids.add(it.groupValues[1])
+            }
         } catch (e: Exception) {
-            return
+            // ignore
         }
-        val html = doc.html()
-
-        // Direct media
-        Regex("""https?://[^"'<>\s]+\.m3u8[^"'<>\s]*""").findAll(html).forEach { out.add(it.value) }
-        Regex("""https?://[^"'<>\s]+\.mp4[^"'<>\s]*""").findAll(html).forEach {
-            val u = it.value
-            if (!u.contains("ibit.ly") && !u.contains("ad")) out.add(u)
-        }
-
-        // Abyss (final public player used by this site)
-        Regex("""https?://(?:www\.)?abysscdn\.com/\?v=[A-Za-z0-9_-]+""").findAll(html).forEach {
-            out.add(it.value)
-        }
-
-        // iframes
-        doc.select("iframe[src]").forEach { iframe ->
-            var src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
-            if (!src.startsWith("http")) return@forEach
-            when {
-                src.contains("abysscdn") -> out.add(src)
-                src.contains("marimo") || src.contains("tonytonychopper") -> {
-                    out.add(src)
-                    collectEmbeds(src, url, out, depth + 1)
-                }
-                else -> out.add(src)
-            }
-        }
-
-        // marimo / tony links in raw html
-        Regex("""https?://(?:player\.marimo\.me|anime\.tonytonychopper\.net)[^"'<>\s]+""")
-            .findAll(html)
-            .forEach { m ->
-                val u = m.value
-                out.add(u)
-                if (depth < 2) collectEmbeds(u, url, out, depth + 1)
-            }
+        return ids.toList()
     }
 }
