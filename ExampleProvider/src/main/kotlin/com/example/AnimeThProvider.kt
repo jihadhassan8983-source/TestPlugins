@@ -16,11 +16,21 @@ class AnimeThProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
+    private val ua =
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
+
     private val headers = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+        "User-Agent" to ua,
         "Accept" to "*/*",
         "Accept-Language" to "th-TH,th;q=0.9,en;q=0.8",
         "Referer" to (mainUrl + "/")
+    )
+
+    private val streamHeaders = mapOf(
+        "User-Agent" to ua,
+        "Accept" to "*/*",
+        "Origin" to "https://anime.tonytonychopper.net",
+        "Referer" to "https://anime.tonytonychopper.net/"
     )
 
     override val mainPage = mainPageOf(
@@ -57,7 +67,9 @@ class AnimeThProvider : MainAPI() {
         }
 
         val out = ArrayList<SearchResponse>()
-        val re2 = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"slug\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cover\"\\s*:\\s*\"([^\"]+)\"")
+        val re2 = Regex(
+            "\"title\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"slug\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cover\"\\s*:\\s*\"([^\"]+)\""
+        )
         re2.findAll(json).forEach { m ->
             val title = m.groupValues[1].replace("\\\"", "\"").replace("\\/", "/")
             val slug = m.groupValues[2]
@@ -114,11 +126,10 @@ class AnimeThProvider : MainAPI() {
         val genres = doc.select("a[href*=/genre/]").map { it.text().trim() }.filter { it.isNotBlank() }
 
         val episodes = ArrayList<Episode>()
+        val seen = HashSet<String>()
         doc.select("a[href*=/watch/]").forEach { a ->
             val href = a.attr("abs:href")
-            if (!href.contains("/watch/")) return@forEach
-            val inList = a.className().contains("ep-item") || a.parents().any { it.id() == "ep-list" }
-            if (!inList) return@forEach
+            if (!href.contains("/watch/") || !seen.add(href)) return@forEach
             val epName = a.text().trim().ifBlank { "Episode" }
             val epNum = Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
             episodes.add(
@@ -127,15 +138,6 @@ class AnimeThProvider : MainAPI() {
                     this.episode = epNum
                 }
             )
-        }
-
-        if (episodes.isEmpty()) {
-            doc.select("a[href*=/watch/]").forEach { a ->
-                val href = a.attr("abs:href")
-                if (!href.contains("/watch/")) return@forEach
-                val epName = a.text().trim().ifBlank { "Episode" }
-                episodes.add(newEpisode(href) { this.name = epName })
-            }
         }
 
         if (episodes.isEmpty()) {
@@ -151,7 +153,7 @@ class AnimeThProvider : MainAPI() {
             this.backgroundPosterUrl = poster
             this.plot = plot
             this.tags = genres.ifEmpty { null }
-            addEpisodes(DubStatus.Dubbed, episodes.distinctBy { it.data })
+            addEpisodes(DubStatus.Dubbed, episodes)
         }
     }
 
@@ -161,15 +163,26 @@ class AnimeThProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (!data.startsWith("http")) return false
+        // If anime page was passed, try first watch link
+        var watchUrl = data
+        if (!data.contains("/watch/")) {
+            try {
+                val doc = app.get(data, headers = headers).document
+                val first = doc.select("a[href*=/watch/]").firstOrNull()?.attr("abs:href")
+                if (first != null) watchUrl = first
+            } catch (e: Exception) {
+                return false
+            }
+        }
+        if (!watchUrl.contains("/watch/")) return false
 
-        val watchId = Regex("""/watch/([A-Za-z0-9]+)\.html""").find(data)?.groupValues?.get(1)
-            ?: data.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
+        val watchId = Regex("""/watch/([A-Za-z0-9]+)\.html""").find(watchUrl)?.groupValues?.get(1)
+            ?: watchUrl.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
 
         val baseJs = try {
             app.get(
                 mainUrl + "/base/" + watchId + "/",
-                headers = headers + mapOf("Referer" to data)
+                headers = headers + mapOf("Referer" to watchUrl)
             ).text
         } catch (e: Exception) {
             ""
@@ -196,38 +209,34 @@ class AnimeThProvider : MainAPI() {
         for (code in playCodes) {
             for (kind in listOf("v", "f", "e")) {
                 val playUrl = streamHost + "/playback/" + kind + "/" + code + "/"
-                val streamIds = extractTonyIds(playUrl, data)
+                val streamIds = extractTonyIds(playUrl, watchUrl)
                 for (sid in streamIds) {
-                    // Only 1080 - other qualities return empty "null" and break player
                     val q1080 = "https://anime.tonytonychopper.net/quality2/" + sid + "/1080/"
-                    if (isValidM3u8(q1080, tonyRef + "v2/" + sid)) {
-                        callback.invoke(
-                            ExtractorLink(
-                                name,
-                                "1080p",
-                                q1080,
-                                tonyRef,
-                                Qualities.P1080.value,
-                                true
-                            )
+                    callback.invoke(
+                        ExtractorLink(
+                            name,
+                            "1080p",
+                            q1080,
+                            tonyRef,
+                            Qualities.P1080.value,
+                            true,
+                            streamHeaders
                         )
-                        found = true
-                    }
+                    )
+                    found = true
 
                     val master = "https://anime.tonytonychopper.net/file2/" + sid + "/"
-                    if (isValidM3u8(master, tonyRef + "v2/" + sid)) {
-                        callback.invoke(
-                            ExtractorLink(
-                                name,
-                                "Auto",
-                                master,
-                                tonyRef,
-                                Qualities.Unknown.value,
-                                true
-                            )
+                    callback.invoke(
+                        ExtractorLink(
+                            name,
+                            "Auto",
+                            master,
+                            tonyRef,
+                            Qualities.Unknown.value,
+                            true,
+                            streamHeaders
                         )
-                        found = true
-                    }
+                    )
                 }
                 if (found) break
             }
@@ -235,23 +244,6 @@ class AnimeThProvider : MainAPI() {
         }
 
         return found
-    }
-
-    private suspend fun isValidM3u8(url: String, referer: String): Boolean {
-        return try {
-            val body = app.get(
-                url,
-                headers = headers + mapOf(
-                    "Referer" to referer,
-                    "Origin" to "https://anime.tonytonychopper.net"
-                )
-            ).text
-            body.contains("#EXTM3U") && (
-                body.contains("#EXTINF") || body.contains("#EXT-X-STREAM-INF")
-            )
-        } catch (e: Exception) {
-            false
-        }
     }
 
     private suspend fun extractTonyIds(playUrl: String, referer: String): List<String> {
@@ -262,6 +254,9 @@ class AnimeThProvider : MainAPI() {
                 headers = headers + mapOf("Referer" to referer)
             ).text
             Regex("""anime\.tonytonychopper\.net/v2/([A-Za-z0-9]+)""").findAll(html).forEach {
+                ids.add(it.groupValues[1])
+            }
+            Regex("""/v2/([A-Za-z0-9]+)""").findAll(html).forEach {
                 ids.add(it.groupValues[1])
             }
         } catch (e: Exception) {
