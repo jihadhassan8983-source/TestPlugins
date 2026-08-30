@@ -3,7 +3,7 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "Egoistrepo - AnimeTH Thai sub and dub"
@@ -12,7 +12,7 @@ cloudstream {
     tvTypes = listOf("Anime", "AnimeMovie")
     requiresResources = true
     language = "th"
-    iconUrl = "https://anime-th.com/assets/image/logo.png"
+    iconUrl = "https://anime-th.com/assets/image/screen.jpg"
 }
 
 android {
