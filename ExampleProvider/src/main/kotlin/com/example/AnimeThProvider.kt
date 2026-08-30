@@ -33,9 +33,12 @@ class AnimeThProvider : MainAPI() {
         "Referer" to "https://anime.tonytonychopper.net/"
     )
 
+    // percent-encoded Thai paths so mobile paste never breaks
     override val mainPage = mainPageOf(
         (mainUrl + "/") to "Home",
-        (mainUrl + "/scoretop/") to "Top Score"
+        (mainUrl + "/scoretop/") to "Top Score",
+        (mainUrl + "/category/%E0%B8%9E%E0%B8%B2%E0%B8%81%E0%B8%A2%E0%B9%8C%E0%B9%84%E0%B8%97%E0%B8%A2/") to "Thai Dub",
+        (mainUrl + "/category/%E0%B8%8B%E0%B8%B1%E0%B8%9A%E0%B9%84%E0%B8%97%E0%B8%A2/") to "Thai Sub"
     )
 
     private fun pageUrl(base: String, page: Int): String {
@@ -57,30 +60,33 @@ class AnimeThProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = URLEncoder.encode(query, "UTF-8")
-        val json = try {
-            app.get(
+        val out = ArrayList<SearchResponse>()
+
+        try {
+            val json = app.get(
                 mainUrl + "/vendor/search-ajax.php?q=" + q,
                 headers = headers + mapOf("X-Requested-With" to "XMLHttpRequest")
             ).text
+            val re = Regex(
+                "\"title\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"slug\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cover\"\\s*:\\s*\"([^\"]+)\""
+            )
+            re.findAll(json).forEach { m ->
+                val title = m.groupValues[1].replace("\\\"", "\"").replace("\\/", "/")
+                val slug = m.groupValues[2].trim('/')
+                var cover = m.groupValues[3].replace("\\/", "/")
+                if (!cover.startsWith("http")) cover = mainUrl + "/" + cover
+                // same URL shape as home cards
+                val page = mainUrl + "/anime/" + slug + "/"
+                out.add(
+                    newAnimeSearchResponse(title, page, TvType.Anime) {
+                        this.posterUrl = cover
+                    }
+                )
+            }
         } catch (e: Exception) {
-            ""
+            // fall through
         }
 
-        val out = ArrayList<SearchResponse>()
-        val re2 = Regex(
-            "\"title\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"slug\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cover\"\\s*:\\s*\"([^\"]+)\""
-        )
-        re2.findAll(json).forEach { m ->
-            val title = m.groupValues[1].replace("\\\"", "\"").replace("\\/", "/")
-            val slug = m.groupValues[2]
-            var cover = m.groupValues[3].replace("\\/", "/")
-            if (!cover.startsWith("http")) cover = mainUrl + "/" + cover
-            out.add(
-                newAnimeSearchResponse(title, mainUrl + "/anime/" + slug + "/", TvType.Anime) {
-                    this.posterUrl = cover
-                }
-            )
-        }
         if (out.isNotEmpty()) return out.distinctBy { it.url }
 
         val doc = app.get(mainUrl + "/search/?s=" + q, headers = headers).document
@@ -90,8 +96,9 @@ class AnimeThProvider : MainAPI() {
     private fun parseCards(doc: Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
         doc.select("a[href*=/anime/]").forEach { a ->
-            val href = a.attr("abs:href")
+            var href = a.attr("abs:href")
             if (!href.contains("/anime/")) return@forEach
+            href = href.trimEnd('/') + "/"
             val slug = href.trimEnd('/').substringAfterLast("/")
             if (slug.isBlank() || slug == "anime") return@forEach
             val title = a.selectFirst("img")?.attr("alt")?.ifBlank { null }
@@ -114,10 +121,11 @@ class AnimeThProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = headers + mapOf("Referer" to (mainUrl + "/"))).document
+        val pageUrl = if (url.endsWith("/")) url else url + "/"
+        val doc = app.get(pageUrl, headers = headers + mapOf("Referer" to (mainUrl + "/"))).document
         val title = doc.selectFirst("h1")?.text()?.trim()
             ?: doc.selectFirst("title")?.text()?.substringBefore(" - ")?.trim()
-            ?: url.trimEnd('/').substringAfterLast('/')
+            ?: pageUrl.trimEnd('/').substringAfterLast('/')
 
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             ?: doc.selectFirst("img[src*=uploads]")?.attr("src")
@@ -127,11 +135,20 @@ class AnimeThProvider : MainAPI() {
 
         val episodes = ArrayList<Episode>()
         val seen = HashSet<String>()
-        doc.select("a[href*=/watch/]").forEach { a ->
-            val href = a.attr("abs:href")
-            if (!href.contains("/watch/") || !seen.add(href)) return@forEach
+
+        // Prefer ep-list / ep-item, then any /watch/
+        val anchors = doc.select("#ep-list a[href*=/watch/], a.ep-item[href*=/watch/], a[href*=/watch/]")
+        anchors.forEach { a ->
+            var href = a.attr("abs:href")
+            if (!href.contains("/watch/")) return@forEach
+            href = href.substringBefore("#")
+            if (!seen.add(href)) return@forEach
+
             val epName = a.text().trim().ifBlank { "Episode" }
-            val epNum = Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
+            val epNum = a.attr("data-ep").toIntOrNull()?.let { it + 1 }
+                ?: Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""/watch/""").let { episodes.size + 1 }
+
             episodes.add(
                 newEpisode(href) {
                     this.name = epName
@@ -141,19 +158,22 @@ class AnimeThProvider : MainAPI() {
         }
 
         if (episodes.isEmpty()) {
-            return newMovieLoadResponse(title, url, TvType.AnimeMovie, url) {
+            return newMovieLoadResponse(title, pageUrl, TvType.AnimeMovie, pageUrl) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.tags = genres.ifEmpty { null }
             }
         }
 
-        return newAnimeLoadResponse(title, url, TvType.Anime) {
+        // sort by episode number when possible
+        val sorted = episodes.sortedWith(compareBy(nullsLast()) { it.episode })
+
+        return newAnimeLoadResponse(title, pageUrl, TvType.Anime) {
             this.posterUrl = poster
             this.backgroundPosterUrl = poster
             this.plot = plot
             this.tags = genres.ifEmpty { null }
-            addEpisodes(DubStatus.Dubbed, episodes)
+            addEpisodes(DubStatus.Dubbed, sorted)
         }
     }
 
@@ -163,12 +183,17 @@ class AnimeThProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // If anime page was passed, try first watch link
-        var watchUrl = data
-        if (!data.contains("/watch/")) {
+        var watchUrl = data.substringBefore("#")
+
+        // Search/home sometimes pass anime page — resolve first watch URL
+        if (!watchUrl.contains("/watch/")) {
             try {
-                val doc = app.get(data, headers = headers).document
-                val first = doc.select("a[href*=/watch/]").firstOrNull()?.attr("abs:href")
+                val doc = app.get(
+                    if (watchUrl.endsWith("/")) watchUrl else watchUrl + "/",
+                    headers = headers
+                ).document
+                val first = doc.select("#ep-list a[href*=/watch/], a.ep-item[href*=/watch/], a[href*=/watch/]")
+                    .firstOrNull()?.attr("abs:href")
                 if (first != null) watchUrl = first
             } catch (e: Exception) {
                 return false
@@ -211,6 +236,7 @@ class AnimeThProvider : MainAPI() {
                 val playUrl = streamHost + "/playback/" + kind + "/" + code + "/"
                 val streamIds = extractTonyIds(playUrl, watchUrl)
                 for (sid in streamIds) {
+                    // Direct 1080 only — avoids empty 360/720 and broken master edge cases
                     val q1080 = "https://anime.tonytonychopper.net/quality2/" + sid + "/1080/"
                     callback.invoke(
                         ExtractorLink(
@@ -224,19 +250,6 @@ class AnimeThProvider : MainAPI() {
                         )
                     )
                     found = true
-
-                    val master = "https://anime.tonytonychopper.net/file2/" + sid + "/"
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            "Auto",
-                            master,
-                            tonyRef,
-                            Qualities.Unknown.value,
-                            true,
-                            streamHeaders
-                        )
-                    )
                 }
                 if (found) break
             }
