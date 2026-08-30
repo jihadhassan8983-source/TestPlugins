@@ -1,6 +1,6 @@
 {
-  "name": "AnimeTH",
-  "description": "Anime-TH Thai sub and dub anime",
+  "name": "Egoistrepo",
+  "description": "Egoistrepo - AnimeTH Thai sub and dub anime",
   "manifestVersion": 1,
   "pluginLists": [
     "https://raw.githubusercontent.com/jihadhassan8983-source/TestPlugins/builds/plugins.json"
