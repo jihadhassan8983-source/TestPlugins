@@ -179,7 +179,6 @@ class AnimeThProvider : MainAPI() {
             .find(baseJs)?.groupValues?.get(1)?.trimEnd('/')
             ?: "https://streaming.tonytonychopper.com"
 
-        // Default: switch_play(0) -> playback/v/CODE
         val playCodes = LinkedHashSet<String>()
         Regex("""playback/v/([A-Za-z0-9]+)/""").findAll(baseJs).forEach {
             playCodes.add(it.groupValues[1])
@@ -192,63 +191,43 @@ class AnimeThProvider : MainAPI() {
         if (playCodes.isEmpty()) playCodes.add(watchId)
 
         var found = false
+        val tonyRef = "https://anime.tonytonychopper.net/"
+
         for (code in playCodes) {
-            val playUrl = streamHost + "/playback/v/" + code + "/"
-            val streamIds = extractTonyIds(playUrl, data)
-            for (sid in streamIds) {
-                // Master HLS
-                val master = "https://anime.tonytonychopper.net/file2/" + sid + "/"
-                callback.invoke(
-                    ExtractorLink(
-                        name,
-                        "Auto",
-                        master,
-                        "https://anime.tonytonychopper.net/",
-                        Qualities.Unknown.value,
-                        true
-                    )
-                )
-                found = true
-
-                // Quality playlists
-                for ((qName, qVal) in listOf(
-                    "1080" to Qualities.P1080.value,
-                    "720" to Qualities.P720.value,
-                    "480" to Qualities.P480.value,
-                    "360" to Qualities.P360.value
-                )) {
-                    val qUrl = "https://anime.tonytonychopper.net/quality2/" + sid + "/" + qName + "/"
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            qName + "p",
-                            qUrl,
-                            "https://anime.tonytonychopper.net/",
-                            qVal,
-                            true
+            for (kind in listOf("v", "f", "e")) {
+                val playUrl = streamHost + "/playback/" + kind + "/" + code + "/"
+                val streamIds = extractTonyIds(playUrl, data)
+                for (sid in streamIds) {
+                    // Only 1080 - other qualities return empty "null" and break player
+                    val q1080 = "https://anime.tonytonychopper.net/quality2/" + sid + "/1080/"
+                    if (isValidM3u8(q1080, tonyRef + "v2/" + sid)) {
+                        callback.invoke(
+                            ExtractorLink(
+                                name,
+                                "1080p",
+                                q1080,
+                                tonyRef,
+                                Qualities.P1080.value,
+                                true
+                            )
                         )
-                    )
-                }
-            }
-            if (found) break
+                        found = true
+                    }
 
-            // Fallback other playback kinds once
-            for (kind in listOf("f", "e")) {
-                val alt = streamHost + "/playback/" + kind + "/" + code + "/"
-                val ids = extractTonyIds(alt, data)
-                for (sid in ids) {
                     val master = "https://anime.tonytonychopper.net/file2/" + sid + "/"
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            "Server " + kind,
-                            master,
-                            "https://anime.tonytonychopper.net/",
-                            Qualities.Unknown.value,
-                            true
+                    if (isValidM3u8(master, tonyRef + "v2/" + sid)) {
+                        callback.invoke(
+                            ExtractorLink(
+                                name,
+                                "Auto",
+                                master,
+                                tonyRef,
+                                Qualities.Unknown.value,
+                                true
+                            )
                         )
-                    )
-                    found = true
+                        found = true
+                    }
                 }
                 if (found) break
             }
@@ -258,6 +237,23 @@ class AnimeThProvider : MainAPI() {
         return found
     }
 
+    private suspend fun isValidM3u8(url: String, referer: String): Boolean {
+        return try {
+            val body = app.get(
+                url,
+                headers = headers + mapOf(
+                    "Referer" to referer,
+                    "Origin" to "https://anime.tonytonychopper.net"
+                )
+            ).text
+            body.contains("#EXTM3U") && (
+                body.contains("#EXTINF") || body.contains("#EXT-X-STREAM-INF")
+            )
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private suspend fun extractTonyIds(playUrl: String, referer: String): List<String> {
         val ids = LinkedHashSet<String>()
         try {
@@ -265,12 +261,7 @@ class AnimeThProvider : MainAPI() {
                 playUrl,
                 headers = headers + mapOf("Referer" to referer)
             ).text
-            // iframe src="https://anime.tonytonychopper.net/v2/XXXX"
             Regex("""anime\.tonytonychopper\.net/v2/([A-Za-z0-9]+)""").findAll(html).forEach {
-                ids.add(it.groupValues[1])
-            }
-            // also any /v2/ id
-            Regex("""/v2/([A-Za-z0-9]+)""").findAll(html).forEach {
                 ids.add(it.groupValues[1])
             }
         } catch (e: Exception) {
