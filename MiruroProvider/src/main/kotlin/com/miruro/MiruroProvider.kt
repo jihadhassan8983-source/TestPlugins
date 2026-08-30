@@ -2,6 +2,8 @@ package com.miruro
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 
@@ -76,7 +78,8 @@ class MiruroProvider : MainAPI() {
             newAnimeSearchResponse(title, "$mainUrl/watch?id=$id", type) {
                 this.posterUrl = poster
                 this.year = media.seasonYear
-                this.dubStatus = setOf(DubStatus.Subbed, DubStatus.Dubbed)
+                addDubStatus(DubStatus.Subbed, 1)
+                addDubStatus(DubStatus.Dubbed, 1)
             }
         } ?: emptyList()
 
@@ -130,7 +133,8 @@ class MiruroProvider : MainAPI() {
             newAnimeSearchResponse(title, "$mainUrl/watch?id=$id", type) {
                 this.posterUrl = poster
                 this.year = media.seasonYear
-                this.dubStatus = setOf(DubStatus.Subbed, DubStatus.Dubbed)
+                addDubStatus(DubStatus.Subbed, 1)
+                addDubStatus(DubStatus.Dubbed, 1)
             }
         } ?: emptyList()
     }
@@ -195,7 +199,7 @@ class MiruroProvider : MainAPI() {
         }
 
         val subEpisodes = (1..totalEpisodes).map { epNum ->
-            newEpisode(data = "$id|$epNum|sub") {
+            newEpisode("$id|$epNum|sub") {
                 this.name = "Episode $epNum"
                 this.episode = epNum
                 this.posterUrl = poster
@@ -203,7 +207,7 @@ class MiruroProvider : MainAPI() {
         }
 
         val dubEpisodes = (1..totalEpisodes).map { epNum ->
-            newEpisode(data = "$id|$epNum|dub") {
+            newEpisode("$id|$epNum|dub") {
                 this.name = "Episode $epNum (Dub)"
                 this.episode = epNum
                 this.posterUrl = poster
@@ -224,12 +228,10 @@ class MiruroProvider : MainAPI() {
             this.tags = media.genres ?: emptyList()
             this.rating = media.averageScore
             this.showStatus = showStatus
-            this.syncData = mapOf(
-                "anilist" to "$id",
-                "mal" to "${media.idMal ?: ""}"
-            )
             addEpisodes(DubStatus.Subbed, subEpisodes)
             addEpisodes(DubStatus.Dubbed, dubEpisodes)
+            addAniListId(id)
+            media.idMal?.let { addMalId(it) }
         }
     }
 
