@@ -12,7 +12,7 @@ cloudstream {
     tvTypes = listOf("Anime", "AnimeMovie")
     requiresResources = true
     language = "th"
-    iconUrl = "https://raw.githubusercontent.com/jihadhassan8983-source/TestPlugins/master/logo.png"
+    iconUrl = "https://anime-th.com/assets/image/logo.png"
 }
 
 android {
