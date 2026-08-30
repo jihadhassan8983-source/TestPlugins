@@ -2,11 +2,11 @@
 
 package com.example
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.nodes.Document
-import java.util.Base64
 
 class AnimeHDProvider : MainAPI() {
     override var mainUrl = "https://animahd.com"
@@ -15,8 +15,7 @@ class AnimeHDProvider : MainAPI() {
     override var lang = "hi"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
-    // Skip HEAD probe — workers.dev returns 403 on HEAD (causes 2004)
-    override var instantLinkLoading = true
+    override val instantLinkLoading = true
 
     private val ua =
         "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
@@ -28,7 +27,6 @@ class AnimeHDProvider : MainAPI() {
         "Referer" to (mainUrl + "/")
     )
 
-    // Hosts change; used only as fallback if player HTML has no targetStreamUrl
     private val embedFallbacks = listOf(
         "https://animewatchinghubonline.animahd.online/?id=",
         "https://youranimewatchingplace.animahd.fun/?id="
@@ -64,7 +62,7 @@ class AnimeHDProvider : MainAPI() {
         val p = Regex("""[?&]p=([A-Za-z0-9+/=]+)""").find(raw)?.groupValues?.get(1) ?: return null
         return try {
             val pad = "=".repeat((4 - p.length % 4) % 4)
-            String(Base64.getDecoder().decode(p + pad))
+            String(Base64.decode(p + pad, Base64.DEFAULT), Charsets.UTF_8)
         } catch (e: Exception) {
             null
         }
@@ -132,13 +130,13 @@ class AnimeHDProvider : MainAPI() {
                     headers = headers
                 ).text
                 list = parseWpPosts(json)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
             }
         }
         if (list.isEmpty() && page <= 1) {
             try {
                 list = parseCardsHtml(app.get(request.data, headers = headers).document)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
             }
         }
         return newHomePageResponse(request.name, list, list.size >= 20)
@@ -153,11 +151,11 @@ class AnimeHDProvider : MainAPI() {
             ).text
             val list = parseWpPosts(json)
             if (list.isNotEmpty()) return list
-        } catch (_: Exception) {
+        } catch (e: Exception) {
         }
         return try {
             parseCardsHtml(app.get(mainUrl + "/?s=" + q, headers = headers).document)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             emptyList()
         }
     }
@@ -213,10 +211,10 @@ class AnimeHDProvider : MainAPI() {
         val episodes = ArrayList<Episode>()
         for ((seasonNum, list) in rows.groupBy { it.season }.toSortedMap()) {
             list.sortedBy { it.epIndex }.forEachIndexed { idx, row ->
+                val epLabel = "S" + seasonNum + "E" + (idx + 1)
                 episodes.add(
                     newEpisode(row.href) {
-                        this.name = if (row.name.isNotBlank() && row.name != "Episode") row.name
-                        else "S\( {seasonNum}E \){idx + 1}"
+                        this.name = if (row.name.isNotBlank() && row.name != "Episode") row.name else epLabel
                         this.season = seasonNum
                         this.episode = idx + 1
                     }
@@ -246,13 +244,10 @@ class AnimeHDProvider : MainAPI() {
 
         var fileId = extractFileId(playerUrl)
 
-        // Anime page → first episode player url
         if (fileId == null && !playerUrl.contains("/player/")) {
             try {
-                val doc = app.get(
-                    if (playerUrl.endsWith("/")) playerUrl else "$playerUrl/",
-                    headers = headers
-                ).document
+                val page = if (playerUrl.endsWith("/")) playerUrl else playerUrl + "/"
+                val doc = app.get(page, headers = headers).document
                 for (a in doc.select("a.app-ep-row-item, a[href*=file_id]")) {
                     var href = a.attr("abs:href").replace("&#038;", "&").replace("&amp;", "&")
                     if (href.contains("sec_route")) href = decodeSecRoute(href) ?: continue
@@ -262,11 +257,10 @@ class AnimeHDProvider : MainAPI() {
                         break
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
             }
         }
 
-        // Always open /player/ page — host is inside targetStreamUrl (changes often)
         var embedUrl: String? = null
         val playerGetUrl = if (playerUrl.contains("/player/") && playerUrl.contains("file_id")) {
             playerUrl
@@ -287,7 +281,7 @@ class AnimeHDProvider : MainAPI() {
                     ?: Regex("""(https?://[^"'\s]*animahd\.(?:online|fun)/\?id=[A-Za-z0-9_-]+)""")
                         .find(html)?.groupValues?.get(1)
                 if (fileId == null) fileId = extractFileId(html) ?: extractFileId(embedUrl ?: "")
-            } catch (_: Exception) {
+            } catch (e: Exception) {
             }
         }
 
@@ -311,17 +305,13 @@ class AnimeHDProvider : MainAPI() {
                         "Origin" to mainUrl
                     )
                 ).text
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 continue
             }
 
-            val embedOrigin = try {
-                val noProto = embed.substringAfter("://")
-                val host = noProto.substringBefore("/")
-                "https://" + host + "/"
-            } catch (_: Exception) {
-                embed
-            }
+            val noProto = embed.substringAfter("://")
+            val host = noProto.substringBefore("/")
+            val embedOrigin = "https://" + host + "/"
 
             val sources = LinkedHashSet<String>()
             Regex("""<source[^>]+src=["']([^"']+)["']""").findAll(embedHtml).forEach {
@@ -335,20 +325,20 @@ class AnimeHDProvider : MainAPI() {
                 "User-Agent" to ua,
                 "Accept" to "*/*",
                 "Referer" to embedOrigin,
-                "Origin" to embedOrigin.trimEnd('/')
+                "Origin" to ("https://" + host)
             )
 
             for (src in sources) {
                 if (!src.contains("workers.dev") && !src.contains("token=")) continue
                 callback.invoke(
                     ExtractorLink(
-                        source = name,
-                        name = "AnimeHD",
-                        url = src,
-                        referer = embedOrigin,
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = false,
-                        headers = streamHeaders
+                        name,
+                        "AnimeHD",
+                        src,
+                        embedOrigin,
+                        Qualities.Unknown.value,
+                        false,
+                        streamHeaders
                     )
                 )
                 found = true
