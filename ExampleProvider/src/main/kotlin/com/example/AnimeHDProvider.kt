@@ -26,13 +26,23 @@ class AnimeHDProvider : MainAPI() {
         "Referer" to (mainUrl + "/")
     )
 
-    // WP category IDs (stable) — avoids /page/2/ 404 and "filter" junk cards
+    // Full category URLs (Cloudstream passes this as request.data)
     override val mainPage = mainPageOf(
-        "8" to "Ongoing",
-        "7" to "Hindi Dub",
-        "9" to "English Dub",
-        "11" to "Anime Movies"
+        (mainUrl + "/category/ongoing/") to "Ongoing",
+        (mainUrl + "/category/hindi-dub/") to "Hindi Dub",
+        (mainUrl + "/category/english-dub/") to "English Dub",
+        (mainUrl + "/category/anime-movies/") to "Anime Movies"
     )
+
+    private fun categoryId(url: String): String? {
+        return when {
+            url.contains("ongoing") -> "8"
+            url.contains("hindi-dub") -> "7"
+            url.contains("english-dub") -> "9"
+            url.contains("anime-movies") -> "11"
+            else -> null
+        }
+    }
 
     private fun decodeHtml(s: String): String {
         return s.replace("&#8211;", "-")
@@ -40,7 +50,6 @@ class AnimeHDProvider : MainAPI() {
             .replace("&#038;", "&")
             .replace("&amp;", "&")
             .replace("&quot;", "\"")
-            .replace("\\u0026", "&")
     }
 
     private fun decodeSecRoute(href: String): String? {
@@ -56,6 +65,7 @@ class AnimeHDProvider : MainAPI() {
 
     private fun parseWpPosts(json: String): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
+        if (!json.trimStart().startsWith("[")) return out
         val chunks = json.split("""{"id":""")
         for (chunk in chunks) {
             val link = Regex(""""link"\s*:\s*"(https://animahd\.com/[^"]+)"""")
@@ -64,7 +74,7 @@ class AnimeHDProvider : MainAPI() {
             val titleRaw = Regex(""""rendered"\s*:\s*"([^"]+)"""")
                 .find(chunk)?.groupValues?.get(1) ?: continue
             val title = decodeHtml(titleRaw)
-            if (title.equals("filter", true)) continue
+            if (title.equals("filter", true) || title.isBlank()) continue
             val poster = Regex(""""_mal_cached_thumb"\s*:\s*"(https://[^"]+)"""")
                 .find(chunk)?.groupValues?.get(1)?.replace("\\/", "/")
             out.add(
@@ -74,39 +84,6 @@ class AnimeHDProvider : MainAPI() {
             )
         }
         return out.distinctBy { it.url }
-    }
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val catId = request.data.trim()
-        val url = mainUrl + "/wp-json/wp/v2/posts?categories=" + catId +
-            "&per_page=20&page=" + page
-        val json = try {
-            app.get(url, headers = headers).text
-        } catch (e: Exception) {
-            return newHomePageResponse(request.name, emptyList(), false)
-        }
-        if (json.trim().startsWith("[").not() || json.length < 10) {
-            return newHomePageResponse(request.name, emptyList(), false)
-        }
-        val list = parseWpPosts(json)
-        return newHomePageResponse(request.name, list, list.isNotEmpty())
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        val q = java.net.URLEncoder.encode(query, "UTF-8")
-        val json = try {
-            app.get(
-                mainUrl + "/wp-json/wp/v2/posts?search=" + q + "&per_page=20",
-                headers = headers
-            ).text
-        } catch (e: Exception) {
-            ""
-        }
-        val list = parseWpPosts(json)
-        if (list.isNotEmpty()) return list
-
-        val doc = app.get(mainUrl + "/?s=" + q, headers = headers).document
-        return parseCardsHtml(doc)
     }
 
     private fun parseCardsHtml(doc: Document): List<SearchResponse> {
@@ -124,7 +101,7 @@ class AnimeHDProvider : MainAPI() {
 
             val title = a.selectFirst(".animahd-card-title")?.text()?.trim()
                 ?: href.trimEnd('/').substringAfterLast('/').replace("-", " ")
-            if (title.equals("filter", true)) return@forEach
+            if (title.equals("filter", true) || title.isBlank()) return@forEach
 
             var poster: String? = null
             val style = a.selectFirst(".animahd-poster")?.attr("style") ?: ""
@@ -138,6 +115,52 @@ class AnimeHDProvider : MainAPI() {
             )
         }
         return out
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val catId = categoryId(request.data)
+        var list = emptyList<SearchResponse>()
+
+        // 1) WP API (good posters + pagination)
+        if (catId != null) {
+            try {
+                val apiUrl = mainUrl + "/wp-json/wp/v2/posts?categories=" + catId +
+                    "&per_page=20&page=" + page
+                val json = app.get(apiUrl, headers = headers).text
+                list = parseWpPosts(json)
+            } catch (_: Exception) {
+            }
+        }
+
+        // 2) HTML fallback (page 1 only — page 2+ is 404 on site)
+        if (list.isEmpty() && page <= 1) {
+            try {
+                val doc = app.get(request.data, headers = headers).document
+                list = parseCardsHtml(doc)
+            } catch (_: Exception) {
+            }
+        }
+
+        val hasNext = list.size >= 20
+        return newHomePageResponse(request.name, list, hasNext)
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val q = java.net.URLEncoder.encode(query, "UTF-8")
+        try {
+            val json = app.get(
+                mainUrl + "/wp-json/wp/v2/posts?search=" + q + "&per_page=20",
+                headers = headers
+            ).text
+            val list = parseWpPosts(json)
+            if (list.isNotEmpty()) return list
+        } catch (_: Exception) {
+        }
+        return try {
+            parseCardsHtml(app.get(mainUrl + "/?s=" + q, headers = headers).document)
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -164,9 +187,7 @@ class AnimeHDProvider : MainAPI() {
             .map { it.text().trim() }
             .filter { it.isNotBlank() && it.length < 40 }
 
-        // Collect episodes with season from data-season
         data class EpRow(val href: String, val season: Int, val epIndex: Int, val name: String)
-
         val rows = ArrayList<EpRow>()
         val seen = HashSet<String>()
 
@@ -181,8 +202,7 @@ class AnimeHDProvider : MainAPI() {
             val seasonName = a.attr("data-season").ifBlank { "Season 1" }
             val seasonNum = Regex("""(\d+)""").find(seasonName)?.groupValues?.get(1)?.toIntOrNull() ?: 1
             val epIndex = Regex("""[?&]ep=(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull() ?: rows.size
-            val name = a.selectFirst(".ff-ep-row-title, .app-ep-title")?.text()?.trim()
-                ?: "Episode"
+            val name = a.selectFirst(".ff-ep-row-title, .app-ep-title")?.text()?.trim() ?: "Episode"
             rows.add(EpRow(href, seasonNum, epIndex, name))
         }
 
@@ -194,12 +214,9 @@ class AnimeHDProvider : MainAPI() {
             }
         }
 
-        // Renumber episode within each season (1,2,3...)
-        val bySeason = rows.groupBy { it.season }.toSortedMap()
         val episodes = ArrayList<Episode>()
-        for ((seasonNum, list) in bySeason) {
-            val ordered = list.sortedBy { it.epIndex }
-            ordered.forEachIndexed { idx, row ->
+        for ((seasonNum, list) in rows.groupBy { it.season }.toSortedMap()) {
+            list.sortedBy { it.epIndex }.forEachIndexed { idx, row ->
                 episodes.add(
                     newEpisode(row.href) {
                         this.name = if (row.name.isNotBlank() && row.name != "Episode") row.name
@@ -227,18 +244,12 @@ class AnimeHDProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var fileId = extractFileId(data)
-
         if (fileId == null && (data.contains("sec_route") || data.contains("p="))) {
             fileId = extractFileId(decodeSecRoute(data) ?: "")
         }
-
-        // Anime page → first episode
         if (fileId == null && !data.contains("file_id") && !data.contains("/player/")) {
             try {
-                val doc = app.get(
-                    if (data.endsWith("/")) data else "$data/",
-                    headers = headers
-                ).document
+                val doc = app.get(if (data.endsWith("/")) data else "$data/", headers = headers).document
                 for (a in doc.select("a.app-ep-row-item, a[href*=file_id]")) {
                     var href = a.attr("abs:href").replace("&#038;", "&").replace("&amp;", "&")
                     if (href.contains("sec_route")) href = decodeSecRoute(href) ?: continue
@@ -248,28 +259,25 @@ class AnimeHDProvider : MainAPI() {
             } catch (_: Exception) {
             }
         }
-
-        // Player HTML → redirect target
         if (fileId == null) {
             try {
-                val html = app.get(
-                    data,
-                    headers = headers + mapOf("Referer" to mainUrl + "/")
-                ).text
+                val html = app.get(data, headers = headers + mapOf("Referer" to mainUrl + "/")).text
                 fileId = extractFileId(html)
                     ?: Regex("""animahd\.fun/\?id=([A-Za-z0-9_-]+)""").find(html)?.groupValues?.get(1)
-                    ?: Regex("""targetStreamUrl\s*=\s*["'][^"']*[?&]id=([A-Za-z0-9_-]+)""")
-                        .find(html)?.groupValues?.get(1)
             } catch (_: Exception) {
             }
         }
-
         if (fileId.isNullOrBlank()) return false
 
-        val embedHosts = listOf(
-            "https://youranimewatchingplace.animahd.fun/?id=",
-            "https://youranimewatchingplace.animahd.fun/?id="
-        )
+        val embedUrl = "https://youranimewatchingplace.animahd.fun/?id=" + fileId
+        val embedHtml = try {
+            app.get(
+                embedUrl,
+                headers = headers + mapOf("Referer" to (mainUrl + "/"), "Origin" to mainUrl)
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
 
         var found = false
         val streamHeaders = mapOf(
@@ -278,52 +286,28 @@ class AnimeHDProvider : MainAPI() {
             "Referer" to "https://youranimewatchingplace.animahd.fun/",
             "Origin" to "https://youranimewatchingplace.animahd.fun"
         )
-
-        for (host in embedHosts.distinct()) {
-            val embedUrl = host + fileId
-            val embedHtml = try {
-                app.get(
-                    embedUrl,
-                    headers = headers + mapOf(
-                        "Referer" to (mainUrl + "/"),
-                        "Origin" to mainUrl
-                    )
-                ).text
-            } catch (_: Exception) {
-                continue
-            }
-
-            val sources = LinkedHashSet<String>()
-            Regex("""<source[^>]+src=["']([^"']+)["']""").findAll(embedHtml).forEach {
-                sources.add(it.groupValues[1].replace("&amp;", "&"))
-            }
-            Regex("""https?://[^"'<>\s]*workers\.dev[^"'<>\s]+""").findAll(embedHtml).forEach {
-                sources.add(it.value.replace("&amp;", "&"))
-            }
-
-            for (src in sources) {
-                if (!src.contains("token=") && !src.contains("workers.dev")) continue
-                callback.invoke(
-                    ExtractorLink(
-                        name,
-                        "AnimeHD",
-                        src,
-                        "https://youranimewatchingplace.animahd.fun/",
-                        Qualities.Unknown.value,
-                        false,
-                        streamHeaders
-                    )
-                )
-                found = true
-            }
-            if (found) break
+        val sources = LinkedHashSet<String>()
+        Regex("""<source[^>]+src=["']([^"']+)["']""").findAll(embedHtml).forEach {
+            sources.add(it.groupValues[1].replace("&amp;", "&"))
         }
-
+        Regex("""https?://[^"'<>\s]*workers\.dev[^"'<>\s]+""").findAll(embedHtml).forEach {
+            sources.add(it.value.replace("&amp;", "&"))
+        }
+        for (src in sources) {
+            if (!src.contains("workers.dev") && !src.contains("token=")) continue
+            callback.invoke(
+                ExtractorLink(
+                    name, "AnimeHD", src,
+                    "https://youranimewatchingplace.animahd.fun/",
+                    Qualities.Unknown.value, false, streamHeaders
+                )
+            )
+            found = true
+        }
         return found
     }
 
     private fun extractFileId(text: String): String? {
         return Regex("""[?&]file_id=([A-Za-z0-9_-]+)""").find(text)?.groupValues?.get(1)
-            ?: Regex("""[?&]id=([A-Za-z0-9_-]{10,})""").find(text)?.groupValues?.get(1)
     }
 }
