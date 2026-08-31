@@ -16,8 +16,7 @@ class AnimeSaltProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    private val ua =
-        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+    private val ua = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
     private fun hdr(ref: String = mainUrl + "/"): Map<String, String> {
         return mapOf(
@@ -40,19 +39,11 @@ class AnimeSaltProvider : MainAPI() {
     private fun pageUrl(base: String, page: Int): String {
         if (page <= 1) return base
         val root = base.trimEnd('/')
-        if (root == mainUrl) return mainUrl + "/tv/page/" + page + "/"
-        return root + "/page/" + page + "/"
+        return if (root == mainUrl) mainUrl + "/tv/page/" + page + "/" else root + "/page/" + page + "/"
     }
 
-    private fun cleanHtml(s: String): String {
-        return s
-            .replace("&quot;", "\"")
-            .replace("&#8211;", "-")
-            .replace("&#8217;", "'")
-            .replace("&amp;", "&")
-            .replace("\\/", "/")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
+    private fun clean(s: String): String {
+        return s.replace("&quot;", "\"").replace("&#8211;", "-").replace("&#8217;", "'").replace("&amp;", "&")
     }
 
     private fun parseCards(doc: Document): List<SearchResponse> {
@@ -61,53 +52,36 @@ class AnimeSaltProvider : MainAPI() {
 
         doc.select("article.anime-card").forEach { card ->
             val a = card.selectFirst("a[href*=/tv/]") ?: return@forEach
-            var href = a.attr("abs:href")
-            if (href.isBlank()) href = a.attr("href")
-            if (!href.startsWith("http")) href = mainUrl + href
+            var href = a.attr("abs:href").ifBlank { a.attr("href") }
+            if (href.isBlank()) return@forEach
             href = href.substringBefore("?").trimEnd('/') + "/"
             if (!seen.add(href)) return@forEach
 
             var title = a.selectFirst("h3")?.text()?.trim().orEmpty()
-            if (title.isBlank()) {
-                title = a.selectFirst("img")?.attr("alt")?.trim().orEmpty()
-            }
-            if (title.isBlank()) {
-                title = href.trimEnd('/').substringAfterLast('/').replace("-", " ")
-            }
-            title = cleanHtml(title)
+            if (title.isBlank()) title = a.selectFirst("img")?.attr("alt")?.trim().orEmpty()
+            if (title.isBlank()) title = href.trimEnd('/').substringAfterLast('/').replace("-", " ")
+            title = clean(title)
 
-            // poster: img first, then saveToWatchHistory 3rd arg
             var poster = a.selectFirst(".poster-wrap img")?.attr("src")
             if (poster.isNullOrBlank()) poster = a.selectFirst("img")?.attr("src")
             if (poster.isNullOrBlank()) {
                 val oc = a.attr("onclick")
-                val m = Regex(
-                    """saveToWatchHistory\s*\(\s*['"][^'"]*['"]\s*,\s*['"][^'"]*['"]\s*,\s*['"]([^'"]+)['"]"""
-                ).find(oc)
-                if (m != null) poster = m.groupValues[1]
+                Regex("""saveToWatchHistory\(.+?,.+?,['"]([^'"]+)['"]""").find(oc)?.let { poster = it.groupValues[1] }
             }
-            if (!poster.isNullOrBlank() && poster.startsWith("//")) {
-                poster = "https:" + poster
-            }
+            if (!poster.isNullOrBlank() && poster.startsWith("//")) poster = "https:" + poster
 
-            out.add(
-                newAnimeSearchResponse(title, href, TvType.Anime) {
-                    this.posterUrl = poster
-                }
-            )
+            out.add(newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = poster })
         }
 
-        // search results page
+        // search
         if (out.isEmpty()) {
             doc.select("h2.entry-title a[href*=/tv/], article a[href*=/tv/]").forEach { a ->
-                var href = a.attr("abs:href")
-                if (href.isBlank()) href = a.attr("href")
+                var href = a.attr("abs:href").ifBlank { a.attr("href") }
                 if (!href.startsWith("http")) href = mainUrl + href
                 href = href.substringBefore("?").trimEnd('/') + "/"
                 if (!seen.add(href)) return@forEach
-                val title = cleanHtml(a.text().trim())
-                if (title.isBlank()) return@forEach
-                out.add(newAnimeSearchResponse(title, href, TvType.Anime))
+                val title = clean(a.text().trim())
+                if (title.isNotBlank()) out.add(newAnimeSearchResponse(title, href, TvType.Anime))
             }
         }
         return out.distinctBy { it.url }
@@ -131,64 +105,36 @@ class AnimeSaltProvider : MainAPI() {
         return parseCards(doc)
     }
 
-    /**
-     * Episode data format (simple, no JSON break):
-     *   PAGE_URL||EP_NUMBER
-     * e.g. https://animesalt.me/tv/mob-psycho-100-season-3/||1
-     */
     override suspend fun load(url: String): LoadResponse {
         val pageUrl = if (url.endsWith("/")) url else url + "/"
         val doc = app.get(pageUrl, headers = hdr()).document
-        val html = cleanHtml(doc.html())
+        val html = clean(doc.html())
 
-        val title = cleanHtml(
+        val title = clean(
             doc.selectFirst("h1")?.text()?.trim()
-                ?: doc.selectFirst("title")?.text()
-                    ?.substringBefore(" Hindi")
-                    ?.substringBefore(" –")
-                    ?.substringBefore(" -")
-                    ?.trim()
+                ?: doc.selectFirst("title")?.text()?.substringBefore(" Hindi")?.substringBefore(" –")?.trim()
                 ?: pageUrl.trimEnd('/').substringAfterLast('/').replace("-", " ")
         )
 
         var poster = doc.selectFirst(".poster-wrap img")?.attr("src")
-        if (poster.isNullOrBlank()) {
-            poster = doc.selectFirst("img[src*=anilist], img[src*=tmdb], img[src*=image.tmdb]")?.attr("src")
-        }
-        if (poster.isNullOrBlank()) {
-            poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-        }
-        if (!poster.isNullOrBlank() && poster.startsWith("//")) {
-            poster = "https:" + poster
-        }
+        if (poster.isNullOrBlank()) poster = doc.selectFirst("img[src*=anilist], img[src*=tmdb]")?.attr("src")
+        if (poster.isNullOrBlank()) poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+        if (!poster.isNullOrBlank() && poster.startsWith("//")) poster = "https:" + poster
 
-        val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
-            ?: doc.selectFirst(".entry-content p")?.text()
+        val plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: doc.selectFirst(".entry-content p")?.text()
 
         val episodes = ArrayList<Episode>()
-        // After cleanHtml entities become real quotes
-        val re = Regex(
-            """triggerEpisode\(\[(.*?)]\s*,\s*"([^"]+)"\s*,\s*"(ep-\d+)"""",
-            RegexOption.DOT_MATCHES_ALL
-        )
+        val re = Regex("""triggerEpisode\(\[(.*?)]\s*,\s*"([^"]+)"\s*,\s*"(ep-\d+)""", RegexOption.DOT_MATCHES_ALL)
         var idx = 0
         re.findAll(html).forEach { m ->
             idx++
-            val epName = cleanHtml(m.groupValues[2])
+            val epName = clean(m.groupValues[2])
             val epNum = Regex("""(\d+)""").find(m.groupValues[3])?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
-                ?: idx
-            val data = pageUrl + "||" + epNum
-            episodes.add(
-                newEpisode(data) {
-                    this.name = epName
-                    this.episode = epNum
-                }
-            )
+                ?: Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull() ?: idx
+            episodes.add(newEpisode(pageUrl + "||" + epNum) { this.name = epName; this.episode = epNum })
         }
 
         if (episodes.isEmpty()) {
-            // Movie / single
             return newMovieLoadResponse(title, pageUrl, TvType.AnimeMovie, pageUrl + "||1") {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = poster
@@ -205,64 +151,44 @@ class AnimeSaltProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         var pageUrl = data
         var epNum = 1
-
         if (data.contains("||")) {
-            val parts = data.split("||")
-            pageUrl = parts[0]
-            epNum = parts.getOrNull(1)?.toIntOrNull() ?: 1
+            val p = data.split("||")
+            pageUrl = p[0]
+            epNum = p.getOrNull(1)?.toIntOrNull() ?: 1
         }
         if (!pageUrl.endsWith("/")) pageUrl = pageUrl + "/"
 
-        val html = try {
-            cleanHtml(app.get(pageUrl, headers = hdr()).text)
-        } catch (e: Exception) {
-            return false
-        }
+        val html = clean(app.get(pageUrl, headers = hdr()).text)
 
-        // Collect servers for matching episode number
-        val servers = ArrayList<Pair<String, String>>() // label to url
-        val re = Regex(
-            """triggerEpisode\(\[(.*?)]\s*,\s*"([^"]+)"\s*,\s*"(ep-\d+)"""",
-            RegexOption.DOT_MATCHES_ALL
-        )
+        val servers = ArrayList<Pair<String, String>>()
+        val re = Regex("""triggerEpisode\(\[(.*?)]\s*,\s*"([^"]+)"\s*,\s*"(ep-\d+)""", RegexOption.DOT_MATCHES_ALL)
         re.findAll(html).forEach { m ->
             val block = m.groupValues[1]
             val epName = m.groupValues[2]
             val tag = m.groupValues[3]
-            val n = Regex("""(\d+)""").find(tag)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
-                ?: -1
+            val n = Regex("""(\d+)""").find(tag)?.groupValues?.get(1)?.toIntOrNull() ?: Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull() ?: -1
             if (n != epNum) return@forEach
 
-            Regex(""""url"\s*:\s*"(https?://[^"]+)"""")
-                .findAll(block)
-                .forEach { um ->
-                    val u = um.groupValues[1]
-                    val start = maxOf(0, um.range.first - 100)
-                    val chunk = block.substring(start, minOf(block.length, um.range.last + 5))
-                    val lang = Regex(""""lang"\s*:\s*"([^"]+)"""").find(chunk)?.groupValues?.get(1) ?: ""
-                    val name = Regex(""""name"\s*:\s*"([^"]+)"""").find(chunk)?.groupValues?.get(1) ?: "HD"
-                    val label = (if (lang.isNotBlank()) lang + " " else "") + name
-                    servers.add(label to u)
-                }
+            Regex(""" "url":\s*"(https?://[^"]+)" """).findAll(block).forEach { um ->
+                val u = um.groupValues[1]
+                val chunkStart = maxOf(0, um.range.first - 120)
+                val chunk = block.substring(chunkStart, minOf(block.length, um.range.last + 10))
+                val lang = Regex(""" "lang":\s*"([^"]+)"""").find(chunk)?.groupValues?.get(1) ?: ""
+                val name = Regex(""" "name":\s*"([^"]+)"""").find(chunk)?.groupValues?.get(1) ?: "HD"
+                val label = (if (lang.isNotBlank()) lang + " " else "") + name
+                servers.add(label to u)
+            }
         }
 
-        // fallback: first episode block if none matched
+        // fallback to first episode
         if (servers.isEmpty()) {
             re.find(html)?.let { m ->
-                Regex(""""url"\s*:\s*"(https?://[^"]+)"""")
-                    .findAll(m.groupValues[1])
-                    .forEach { um ->
-                        servers.add("Server" to um.groupValues[1])
-                    }
+                Regex(""" "url":\s*"(https?://[^"]+)" """).findAll(m.groupValues[1]).forEach { um ->
+                    servers.add("Server" to um.groupValues[1])
+                }
             }
         }
 
@@ -271,59 +197,27 @@ class AnimeSaltProvider : MainAPI() {
         var found = false
         for ((label, embed) in servers.distinctBy { it.second }) {
             try {
-                if (embed.contains("vidmoly", ignoreCase = true)) {
+                if (embed.contains("vidmoly", ignoreCase = true) || embed.contains("vidmoly.to", ignoreCase = true)) {
                     if (extractVidmoly(embed, label, callback)) {
                         found = true
                         continue
                     }
                 }
-
-                // built-in extractors (streamtape, dood, etc.)
                 if (loadExtractor(embed, mainUrl + "/", subtitleCallback, callback)) {
                     found = true
                     continue
                 }
 
-                // generic m3u8 / mp4 on embed page
+                // generic m3u8 / mp4
                 val body = app.get(embed, headers = hdr(mainUrl + "/")).text
-                Regex("""https?://[^"'\\s<>]+\.m3u8[^"'\\s<>]*""")
-                    .findAll(body)
-                    .forEach { mm ->
-                        callback.invoke(
-                            ExtractorLink(
-                                this.name,
-                                label,
-                                mm.value,
-                                embed,
-                                Qualities.Unknown.value,
-                                true,
-                                headers = mapOf(
-                                    "User-Agent" to ua,
-                                    "Referer" to embed
-                                )
-                            )
-                        )
-                        found = true
-                    }
-                Regex("""https?://[^"'\\s<>]+\.mp4[^"'\\s<>]*""")
-                    .findAll(body)
-                    .forEach { mm ->
-                        callback.invoke(
-                            ExtractorLink(
-                                this.name,
-                                label,
-                                mm.value,
-                                embed,
-                                Qualities.Unknown.value,
-                                false,
-                                headers = mapOf(
-                                    "User-Agent" to ua,
-                                    "Referer" to embed
-                                )
-                            )
-                        )
-                        found = true
-                    }
+                Regex("""https?://[^"'\\s<>]+\.m3u8[^"'\\s<>]*""").findAll(body).forEach { mm ->
+                    callback(ExtractorLink(this.name, label, mm.value, embed, Qualities.Unknown.value, true))
+                    found = true
+                }
+                Regex("""https?://[^"'\\s<>]+\.mp4[^"'\\s<>]*""").findAll(body).forEach { mm ->
+                    callback(ExtractorLink(this.name, label, mm.value, embed, Qualities.Unknown.value, false))
+                    found = true
+                }
             } catch (_: Exception) {
                 continue
             }
@@ -331,47 +225,16 @@ class AnimeSaltProvider : MainAPI() {
         return found
     }
 
-    private suspend fun extractVidmoly(
-        embed: String,
-        label: String,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val html = app.get(
-            embed,
-            headers = mapOf(
-                "User-Agent" to ua,
-                "Referer" to (mainUrl + "/"),
-                "Accept" to "*/*"
-            )
-        ).text
-
+    private suspend fun extractVidmoly(embed: String, label: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val html = app.get(embed, headers = mapOf("User-Agent" to ua, "Referer" to (mainUrl + "/"))).text
         val sources = LinkedHashSet<String>()
-        Regex("""file:\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
-            .findAll(html)
-            .forEach { sources.add(it.groupValues[1]) }
-        Regex("""https?://[^"'\\s<>]+\.m3u8[^"'\\s<>]*""")
-            .findAll(html)
-            .forEach { sources.add(it.value) }
+        Regex("""file:\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""").findAll(html).forEach { sources.add(it.groupValues[1]) }
+        Regex("""https?://[^"'\\s<>]+\.m3u8[^"'\\s<>]*""").findAll(html).forEach { sources.add(it.value) }
 
         if (sources.isEmpty()) return false
-
         for (src in sources) {
-            callback.invoke(
-                ExtractorLink(
-                    this.name,
-                    label,
-                    src,
-                    "https://vidmoly.org/",
-                    Qualities.Unknown.value,
-                    true,
-                    headers = mapOf(
-                        "User-Agent" to ua,
-                        "Referer" to "https://vidmoly.org/",
-                        "Origin" to "https://vidmoly.org"
-                    )
-                )
-            )
+            callback(ExtractorLink(this.name, label, src, "https://vidmoly.org/", Qualities.Unknown.value, true))
         }
         return true
     }
-}
+                                 }
