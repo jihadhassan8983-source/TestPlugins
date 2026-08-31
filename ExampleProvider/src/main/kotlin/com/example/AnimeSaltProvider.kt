@@ -73,7 +73,6 @@ class AnimeSaltProvider : MainAPI() {
             out.add(newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = poster })
         }
 
-        // search
         if (out.isEmpty()) {
             doc.select("h2.entry-title a[href*=/tv/], article a[href*=/tv/]").forEach { a ->
                 var href = a.attr("abs:href").ifBlank { a.attr("href") }
@@ -163,15 +162,11 @@ class AnimeSaltProvider : MainAPI() {
 
         val html = clean(app.get(pageUrl, headers = hdr()).text)
 
+        // এপিসোডের সব সার্ভার একসাথে সংগ্রহ (আগে এপিসোড ম্যাচিং করা হতো, এখন সব একসাথে)
         val servers = ArrayList<Pair<String, String>>()
         val re = Regex("""triggerEpisode\(\[(.*?)]\s*,\s*"([^"]+)"\s*,\s*"(ep-\d+)""", RegexOption.DOT_MATCHES_ALL)
         re.findAll(html).forEach { m ->
             val block = m.groupValues[1]
-            val epName = m.groupValues[2]
-            val tag = m.groupValues[3]
-            val n = Regex("""(\d+)""").find(tag)?.groupValues?.get(1)?.toIntOrNull() ?: Regex("""(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-            if (n != epNum) return@forEach
-
             Regex(""" "url":\s*"(https?://[^"]+)" """).findAll(block).forEach { um ->
                 val u = um.groupValues[1]
                 val chunkStart = maxOf(0, um.range.first - 120)
@@ -183,7 +178,7 @@ class AnimeSaltProvider : MainAPI() {
             }
         }
 
-        // fallback to first episode
+        // fallback
         if (servers.isEmpty()) {
             re.find(html)?.let { m ->
                 Regex(""" "url":\s*"(https?://[^"]+)" """).findAll(m.groupValues[1]).forEach { um ->
@@ -208,7 +203,6 @@ class AnimeSaltProvider : MainAPI() {
                     continue
                 }
 
-                // generic m3u8 / mp4
                 val body = app.get(embed, headers = hdr(mainUrl + "/")).text
                 Regex("""https?://[^"'\\s<>]+\.m3u8[^"'\\s<>]*""").findAll(body).forEach { mm ->
                     callback(ExtractorLink(this.name, label, mm.value, embed, Qualities.Unknown.value, true))
