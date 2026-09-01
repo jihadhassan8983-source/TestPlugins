@@ -43,7 +43,9 @@ class AnimeLokProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
+        if (page > 1) {
+            return newHomePageResponse(request.name, emptyList(), false)
+        }
         val html = app.get(request.data, headers = headers).text
         val list = parseCards(html)
         return newHomePageResponse(request.name, list, list.isNotEmpty())
@@ -60,13 +62,14 @@ class AnimeLokProvider : MainAPI() {
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
 
-        // 1) /anime/slug cards
         for (a in doc.select("a[href*=/anime/]")) {
             var href = a.attr("abs:href")
             if (href.isBlank()) href = a.attr("href")
             if (href.isBlank()) continue
 
-            var slug = href.substringAfter("/anime/").substringBefore("/").substringBefore("?")
+            var slug = href.substringAfter("/anime/")
+            slug = slug.substringBefore("/")
+            slug = slug.substringBefore("?")
             if (slug.isBlank() || slug == "cover") continue
             if (!seen.add(slug)) continue
 
@@ -78,7 +81,9 @@ class AnimeLokProvider : MainAPI() {
             if (title.isBlank() || title.equals("Animelok", true) || title.contains("logo", true)) {
                 title = a.attr("title").trim()
             }
-            if (title.isBlank()) title = a.text().trim()
+            if (title.isBlank()) {
+                title = a.text().trim()
+            }
             if (title.isBlank() || title.equals("Home", true)) {
                 title = slugToTitle(slug)
             }
@@ -98,22 +103,31 @@ class AnimeLokProvider : MainAPI() {
             )
         }
 
-        // 2) /watch/slug?ep=  (Latest Episodes page)
         for (a in doc.select("a[href*=/watch/]")) {
             var href = a.attr("abs:href")
             if (href.isBlank()) href = a.attr("href")
             if (href.isBlank()) continue
 
-            var slug = href.substringAfter("/watch/").substringBefore("?").substringBefore("/")
+            var slug = href.substringAfter("/watch/")
+            slug = slug.substringBefore("?")
+            slug = slug.substringBefore("/")
             if (slug.isBlank()) continue
             if (!seen.add(slug)) continue
 
             var title = ""
             val img = a.selectFirst("img")
-            if (img != null) title = img.attr("alt").trim()
-            if (title.isBlank()) title = a.attr("title").trim()
-            if (title.isBlank()) title = a.text().trim()
-            if (title.isBlank()) title = slugToTitle(slug)
+            if (img != null) {
+                title = img.attr("alt").trim()
+            }
+            if (title.isBlank()) {
+                title = a.attr("title").trim()
+            }
+            if (title.isBlank()) {
+                title = a.text().trim()
+            }
+            if (title.isBlank()) {
+                title = slugToTitle(slug)
+            }
 
             var poster: String? = null
             if (img != null) {
@@ -132,40 +146,72 @@ class AnimeLokProvider : MainAPI() {
     }
 
     private fun slugToTitle(slug: String): String {
-        val base = slug.replace(Regex("-\\d+$"), "").replace("-", " ").trim()
+        var base = slug
+        val dash = base.lastIndexOf('-')
+        if (dash > 0) {
+            val tail = base.substring(dash + 1)
+            if (tail.all { it.isDigit() }) {
+                base = base.substring(0, dash)
+            }
+        }
+        base = base.replace("-", " ").trim()
         if (base.isBlank()) return slug
         return base.split(" ").joinToString(" ") { w ->
-            if (w.isEmpty()) w else w.replaceFirstChar { c -> c.uppercaseChar() }
+            if (w.isEmpty()) w
+            else w.replaceFirstChar { c -> c.uppercaseChar() }
         }
+    }
+
+    private fun isHashSlug(slug: String): Boolean {
+        if (slug.length < 12) return false
+        return slug.all { ch ->
+            (ch in '0'..'9') || (ch in 'a'..'f')
+        }
+    }
+
+    private fun isSeoSlug(slug: String): Boolean {
+        if (!slug.contains("-")) return false
+        if (isHashSlug(slug)) return false
+        return slug.any { it.isDigit() }
     }
 
     private suspend fun resolveSlug(urlOrSlug: String): String {
         var slug = urlOrSlug
-            .substringAfterLast("/anime/")
-            .substringAfterLast("/watch/")
-            .substringBefore("/")
-            .substringBefore("?")
-            .trim()
+        if (slug.contains("/anime/")) {
+            slug = slug.substringAfterLast("/anime/")
+        }
+        if (slug.contains("/watch/")) {
+            slug = slug.substringAfterLast("/watch/")
+        }
+        slug = slug.substringBefore("/")
+        slug = slug.substringBefore("?")
+        slug = slug.trim()
         if (slug.isBlank()) slug = urlOrSlug.trim()
 
-        // SEO slug: name-123
-        if (Regex(".*-\\d+\( ").matches(slug) && !Regex("^[a-f0-9]{12,} \)").matches(slug)) {
+        if (isSeoSlug(slug)) {
             return slug
         }
 
-        // Hash page -> find SEO slug
         try {
             val html = app.get(mainUrl + "/anime/" + slug, headers = headers).text
-            val m = Regex("\"slug\"\\s*:\\s*\"([a-z0-9-]+-\\d+)\"").find(html)
-            if (m != null) return m.groupValues[1]
 
-            val found = Regex("/anime/([a-z0-9]+(?:-[a-z0-9]+)+-\\d+)").findAll(html)
-                .map { it.groupValues[1] }
-                .firstOrNull { it != slug && it != "cover" }
-            if (found != null) return found
+            val m1 = Regex("\"slug\"\\s*:\\s*\"([a-z0-9-]+-[0-9]+)\"").find(html)
+            if (m1 != null) {
+                return m1.groupValues[1]
+            }
 
-            val watch = Regex("/watch/([a-z0-9]+(?:-[a-z0-9]+)+-\\d+)").find(html)
-            if (watch != null) return watch.groupValues[1]
+            val m2 = Regex("/anime/([a-z0-9]+(?:-[a-z0-9]+)+-[0-9]+)").findAll(html)
+            for (m in m2) {
+                val s = m.groupValues[1]
+                if (s != slug && s != "cover") {
+                    return s
+                }
+            }
+
+            val m3 = Regex("/watch/([a-z0-9]+(?:-[a-z0-9]+)+-[0-9]+)").find(html)
+            if (m3 != null) {
+                return m3.groupValues[1]
+            }
         } catch (_: Exception) {
         }
         return slug
@@ -192,22 +238,21 @@ class AnimeLokProvider : MainAPI() {
         val epNums = LinkedHashSet<Int>()
         epNums.add(1)
 
-        // episodes-range
         try {
             var page = 1
             var totalPages = 1
             while (page <= totalPages && page <= 80) {
                 val rangeText = app.get(
                     mainUrl + "/api/anime/" + slug +
-                            "/episodes-range?page=" + page + "&lang=ALL&pageSize=50",
+                        "/episodes-range?page=" + page + "&lang=ALL&pageSize=50",
                     headers = jsonHeaders
                 ).text
                 val range = try {
                     parseJson<RangeResponse>(rangeText)
                 } catch (_: Exception) {
                     null
-                } ?: break
-
+                }
+                if (range == null) break
                 totalPages = range.totalPages ?: 1
                 val list = range.episodes
                 if (list != null) {
@@ -221,7 +266,6 @@ class AnimeLokProvider : MainAPI() {
         } catch (_: Exception) {
         }
 
-        // probe if still only ep 1
         if (epNums.size <= 1) {
             var n = 2
             var miss = 0
@@ -245,7 +289,9 @@ class AnimeLokProvider : MainAPI() {
         } else {
             val max = epNums.maxOrNull() ?: 1
             if (max <= 150) {
-                for (i in 1..max) epNums.add(i)
+                for (i in 1..max) {
+                    epNums.add(i)
+                }
             }
         }
 
@@ -273,7 +319,8 @@ class AnimeLokProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (data.isBlank() || !data.contains("||")) return false
+        if (data.isBlank()) return false
+        if (!data.contains("||")) return false
 
         val parts = data.split("||")
         val slug = parts[0]
@@ -305,9 +352,7 @@ class AnimeLokProvider : MainAPI() {
             val tip = server.tip ?: server.name ?: "Server"
             val baseLabel = if (lang.isNotBlank()) (lang + " - " + tip) else tip
 
-            // Expand URL list (plain string OR JSON array string)
             val urls = expandUrls(rawUrl)
-
             for ((quality, mediaUrl) in urls) {
                 if (!mediaUrl.startsWith("http")) continue
                 val label = if (quality.isNotBlank()) (baseLabel + " " + quality) else baseLabel
@@ -351,7 +396,6 @@ class AnimeLokProvider : MainAPI() {
                     } catch (_: Exception) {
                     }
 
-                    // last resort: try open page for m3u8
                     try {
                         val body = app.get(mediaUrl, headers = headers).text
                         val re = Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*")
@@ -375,7 +419,6 @@ class AnimeLokProvider : MainAPI() {
             }
         }
 
-        // MegaPlay backup
         if (realAnilist > 0) {
             for (type in listOf("sub", "dub")) {
                 try {
@@ -390,7 +433,6 @@ class AnimeLokProvider : MainAPI() {
         return found
     }
 
-    /** url can be normal link OR JSON array string of {url, quality} */
     private fun expandUrls(raw: String): List<Pair<String, String>> {
         val t = raw.trim()
         val out = ArrayList<Pair<String, String>>()
@@ -403,14 +445,14 @@ class AnimeLokProvider : MainAPI() {
                     out.add((item.quality ?: "") to u)
                 }
             } catch (_: Exception) {
-                // regex fallback
                 val re = Regex("\"url\"\\s*:\\s*\"(https?://[^\"]+)\"")
                 val rq = Regex("\"quality\"\\s*:\\s*\"([^\"]+)\"")
                 val qualities = rq.findAll(t).map { it.groupValues[1] }.toList()
                 var i = 0
                 re.findAll(t).forEach { m ->
                     val q = qualities.getOrNull(i) ?: ""
-                    out.add(q to m.groupValues[1].replace("\\/", "/"))
+                    val u = m.groupValues[1].replace("\\/", "/")
+                    out.add(q to u)
                     i++
                 }
             }
@@ -444,7 +486,7 @@ class AnimeLokProvider : MainAPI() {
         ).text
 
         val playerId = Regex("data-id=\"([0-9]+)\"").find(mpHtml)?.groupValues?.getOrNull(1)
-            ?: return false
+        if (playerId.isNullOrBlank()) return false
 
         val sourcesJson = app.get(
             "https://megaplay.buzz/stream/getSources?id=" + playerId,
@@ -461,7 +503,8 @@ class AnimeLokProvider : MainAPI() {
             ?.groupValues
             ?.getOrNull(1)
             ?.replace("\\/", "/")
-            ?: return false
+
+        if (file.isNullOrBlank()) return false
 
         callback.invoke(
             ExtractorLink(
