@@ -25,7 +25,6 @@ class AnimeLokProvider : MainAPI() {
     private val headers = mapOf(
         "User-Agent" to ua,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9,hi;q=0.8",
         "Referer" to (mainUrl + "/")
     )
 
@@ -44,46 +43,47 @@ class AnimeLokProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (page > 1) {
-            return newHomePageResponse(request.name, emptyList(), false)
-        }
-        val doc = app.get(request.data, headers = headers).document
-        val list = parseAnimeCards(doc.html())
+        if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
+        val html = app.get(request.data, headers = headers).text
+        val list = parseCards(html)
         return newHomePageResponse(request.name, list, list.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = URLEncoder.encode(query, "UTF-8")
         val html = app.get(mainUrl + "/search?q=" + q, headers = headers).text
-        return parseAnimeCards(html)
+        return parseCards(html)
     }
 
-    private fun parseAnimeCards(html: String): List<SearchResponse> {
+    private fun parseCards(html: String): List<SearchResponse> {
         val doc = Jsoup.parse(html, mainUrl)
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
 
-        // Prefer SEO slugs like /anime/one-piece-21
-        val anchors = doc.select("a[href*=/anime/]")
-        for (a in anchors) {
+        // 1) /anime/slug cards
+        for (a in doc.select("a[href*=/anime/]")) {
             var href = a.attr("abs:href")
             if (href.isBlank()) href = a.attr("href")
             if (href.isBlank()) continue
 
-            val slug = href.substringAfter("/anime/").substringBefore("/").substringBefore("?")
+            var slug = href.substringAfter("/anime/").substringBefore("/").substringBefore("?")
             if (slug.isBlank() || slug == "cover") continue
-            // skip pure hash-only if we can; still allow, resolve later in load
             if (!seen.add(slug)) continue
 
-            var title = a.attr("title").trim()
-            if (title.isBlank()) title = a.text().trim()
-            if (title.isBlank()) {
-                title = slug.replace(Regex("-\\d+$"), "").replace("-", " ")
-            }
-            // skip nav junk
-            if (title.equals("Home", true) || title.length < 2) continue
-
+            var title = ""
             val img = a.selectFirst("img")
+            if (img != null) {
+                title = img.attr("alt").trim()
+            }
+            if (title.isBlank() || title.equals("Animelok", true) || title.contains("logo", true)) {
+                title = a.attr("title").trim()
+            }
+            if (title.isBlank()) title = a.text().trim()
+            if (title.isBlank() || title.equals("Home", true)) {
+                title = slugToTitle(slug)
+            }
+            if (title.length < 2) continue
+
             var poster: String? = null
             if (img != null) {
                 poster = img.attr("abs:src")
@@ -91,37 +91,81 @@ class AnimeLokProvider : MainAPI() {
                 if (poster.isNullOrBlank()) poster = img.attr("data-src")
             }
 
-            val url = mainUrl + "/anime/" + slug
             out.add(
-                newAnimeSearchResponse(title, url, TvType.Anime) {
+                newAnimeSearchResponse(title, mainUrl + "/anime/" + slug, TvType.Anime) {
                     this.posterUrl = poster
                 }
             )
         }
+
+        // 2) /watch/slug?ep=  (Latest Episodes page)
+        for (a in doc.select("a[href*=/watch/]")) {
+            var href = a.attr("abs:href")
+            if (href.isBlank()) href = a.attr("href")
+            if (href.isBlank()) continue
+
+            var slug = href.substringAfter("/watch/").substringBefore("?").substringBefore("/")
+            if (slug.isBlank()) continue
+            if (!seen.add(slug)) continue
+
+            var title = ""
+            val img = a.selectFirst("img")
+            if (img != null) title = img.attr("alt").trim()
+            if (title.isBlank()) title = a.attr("title").trim()
+            if (title.isBlank()) title = a.text().trim()
+            if (title.isBlank()) title = slugToTitle(slug)
+
+            var poster: String? = null
+            if (img != null) {
+                poster = img.attr("abs:src")
+                if (poster.isNullOrBlank()) poster = img.attr("src")
+            }
+
+            out.add(
+                newAnimeSearchResponse(title, mainUrl + "/anime/" + slug, TvType.Anime) {
+                    this.posterUrl = poster
+                }
+            )
+        }
+
         return out.distinctBy { it.url }
     }
 
-    /** Resolve hash id pages to SEO slug (one-piece-21) for API */
+    private fun slugToTitle(slug: String): String {
+        val base = slug.replace(Regex("-\\d+$"), "").replace("-", " ").trim()
+        if (base.isBlank()) return slug
+        return base.split(" ").joinToString(" ") { w ->
+            if (w.isEmpty()) w else w.replaceFirstChar { c -> c.uppercaseChar() }
+        }
+    }
+
     private suspend fun resolveSlug(urlOrSlug: String): String {
-        var slug = urlOrSlug.substringAfterLast("/anime/").substringAfterLast("/watch/")
-            .substringBefore("/").substringBefore("?").trim()
+        var slug = urlOrSlug
+            .substringAfterLast("/anime/")
+            .substringAfterLast("/watch/")
+            .substringBefore("/")
+            .substringBefore("?")
+            .trim()
         if (slug.isBlank()) slug = urlOrSlug.trim()
 
-        // already SEO style: name-12345
-        if (slug.contains("-") && slug.any { it.isDigit() } && !slug.matches(Regex("^[a-f0-9]{10,}$"))) {
+        // SEO slug: name-123
+        if (Regex(".*-\\d+\( ").matches(slug) && !Regex("^[a-f0-9]{12,} \)").matches(slug)) {
             return slug
         }
 
-        // hash page -> find real slug from page
+        // Hash page -> find SEO slug
         try {
             val html = app.get(mainUrl + "/anime/" + slug, headers = headers).text
             val m = Regex("\"slug\"\\s*:\\s*\"([a-z0-9-]+-\\d+)\"").find(html)
             if (m != null) return m.groupValues[1]
 
-            val m2 = Regex("/anime/([a-z0-9]+(?:-[a-z0-9]+)+-\\d+)").findAll(html)
+            val found = Regex("/anime/([a-z0-9]+(?:-[a-z0-9]+)+-\\d+)").findAll(html)
                 .map { it.groupValues[1] }
                 .firstOrNull { it != slug && it != "cover" }
-            if (m2 != null) return m2
+            if (found != null) return found
+
+            val watch = Regex("/watch/([a-z0-9]+(?:-[a-z0-9]+)+-\\d+)").find(html)
+            if (watch != null) return watch.groupValues[1]
         } catch (_: Exception) {
         }
         return slug
@@ -130,105 +174,96 @@ class AnimeLokProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val slug = resolveSlug(url)
 
-        // Episode 1 = metadata + confirm API works
-        val ep1Text = try {
-            app.get(
-                mainUrl + "/api/anime/" + slug + "/episodes/1",
-                headers = jsonHeaders
-            ).text
-        } catch (e: Exception) {
-            throw ErrorLoadingException("Anime not found: " + slug)
-        }
+        val ep1Text = app.get(
+            mainUrl + "/api/anime/" + slug + "/episodes/1",
+            headers = jsonHeaders
+        ).text
 
         val ep1 = try {
             parseJson<EpResponse>(ep1Text)
         } catch (e: Exception) {
-            throw ErrorLoadingException("Bad episode data")
+            throw ErrorLoadingException("Cannot load anime: " + slug)
         }
 
-        val title = ep1.anime?.title ?: slug
-        val anilistId = ep1.anime?.anilistId
+        val title = ep1.anime?.title ?: slugToTitle(slug)
+        val anilistId = ep1.anime?.anilistId ?: 0
         val poster = ep1.episode?.img
 
-        // Collect episode numbers
         val epNums = LinkedHashSet<Int>()
         epNums.add(1)
 
-        // episodes-range pages
+        // episodes-range
         try {
             var page = 1
             var totalPages = 1
-            while (page <= totalPages && page <= 60) {
+            while (page <= totalPages && page <= 80) {
                 val rangeText = app.get(
-                    mainUrl + "/api/anime/" + slug + "/episodes-range?page=" + page +
-                            "&lang=ALL&pageSize=50",
+                    mainUrl + "/api/anime/" + slug +
+                            "/episodes-range?page=" + page + "&lang=ALL&pageSize=50",
                     headers = jsonHeaders
                 ).text
                 val range = try {
                     parseJson<RangeResponse>(rangeText)
                 } catch (_: Exception) {
                     null
-                }
-                if (range == null) break
+                } ?: break
+
                 totalPages = range.totalPages ?: 1
-                range.episodes?.forEach { e ->
-                    val n = e.number
-                    if (n != null && n > 0) epNums.add(n)
+                val list = range.episodes
+                if (list != null) {
+                    for (e in list) {
+                        val n = e.number
+                        if (n != null && n > 0) epNums.add(n)
+                    }
                 }
                 page++
             }
         } catch (_: Exception) {
         }
 
-        // If range empty, probe sequentially (short series)
+        // probe if still only ep 1
         if (epNums.size <= 1) {
             var n = 2
-            var misses = 0
-            while (n <= 60 && misses < 3) {
+            var miss = 0
+            while (n <= 40 && miss < 2) {
                 try {
-                    val code = app.get(
+                    val t = app.get(
                         mainUrl + "/api/anime/" + slug + "/episodes/" + n,
                         headers = jsonHeaders
-                    ).code
-                    if (code in 200..299) {
+                    ).text
+                    if (t.contains("\"number\"")) {
                         epNums.add(n)
-                        misses = 0
+                        miss = 0
                     } else {
-                        misses++
+                        miss++
                     }
                 } catch (_: Exception) {
-                    misses++
+                    miss++
                 }
                 n++
             }
         } else {
-            // fill small gaps for series under 200 eps
             val max = epNums.maxOrNull() ?: 1
-            if (max <= 200) {
+            if (max <= 150) {
                 for (i in 1..max) epNums.add(i)
             }
         }
 
-        val episodes = epNums.sorted().map { num ->
-            newEpisode(slug + "||" + num + "||" + (anilistId ?: 0)) {
-                this.name = "Episode " + num
-                this.episode = num
-                this.season = 1
-            }
+        val episodes = ArrayList<Episode>()
+        for (num in epNums.sorted()) {
+            episodes.add(
+                newEpisode(slug + "||" + num + "||" + anilistId) {
+                    this.name = "Episode " + num
+                    this.episode = num
+                    this.season = 1
+                }
+            )
         }
 
-        val isMovie = episodes.size <= 1 && (title.contains("Movie", true) || title.contains("Film", true))
-
-        return if (isMovie) {
-            newMovieLoadResponse(title, mainUrl + "/anime/" + slug, TvType.AnimeMovie, episodes.firstOrNull()?.data ?: "") {
-                this.posterUrl = poster
-            }
-        } else {
-            newAnimeLoadResponse(title, mainUrl + "/anime/" + slug, TvType.Anime) {
-                this.posterUrl = poster
-                addEpisodes(DubStatus.Dubbed, episodes)
-                addEpisodes(DubStatus.Subbed, episodes)
-            }
+        return newAnimeLoadResponse(title, mainUrl + "/anime/" + slug, TvType.Anime) {
+            this.posterUrl = poster
+            addEpisodes(DubStatus.Subbed, episodes)
+            addEpisodes(DubStatus.Dubbed, episodes)
         }
     }
 
@@ -238,10 +273,10 @@ class AnimeLokProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (data.isBlank()) return false
+        if (data.isBlank() || !data.contains("||")) return false
 
         val parts = data.split("||")
-        val slug = parts.getOrNull(0) ?: return false
+        val slug = parts[0]
         val epNum = parts.getOrNull(1)?.toIntOrNull() ?: 1
         val anilistId = parts.getOrNull(2)?.toIntOrNull() ?: 0
 
@@ -265,79 +300,82 @@ class AnimeLokProvider : MainAPI() {
         val realAnilist = epData.anime?.anilistId ?: anilistId
 
         for (server in servers) {
-            val url = server.url ?: continue
-            if (!url.startsWith("http")) continue
-
+            val rawUrl = server.url ?: continue
             val lang = server.languages?.firstOrNull() ?: ""
             val tip = server.tip ?: server.name ?: "Server"
-            val label = if (lang.isNotBlank()) (lang + " - " + tip) else tip
+            val baseLabel = if (lang.isNotBlank()) (lang + " - " + tip) else tip
 
-            try {
-                // Direct m3u8 (best)
-                if (url.contains(".m3u8")) {
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            label,
-                            url,
-                            mainUrl,
-                            Qualities.Unknown.value,
-                            true
-                        )
-                    )
-                    found = true
-                    continue
-                }
+            // Expand URL list (plain string OR JSON array string)
+            val urls = expandUrls(rawUrl)
 
-                // Direct mp4
-                if (url.contains(".mp4")) {
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            label,
-                            url,
-                            mainUrl,
-                            Qualities.Unknown.value,
-                            false
-                        )
-                    )
-                    found = true
-                    continue
-                }
+            for ((quality, mediaUrl) in urls) {
+                if (!mediaUrl.startsWith("http")) continue
+                val label = if (quality.isNotBlank()) (baseLabel + " " + quality) else baseLabel
 
-                // Built-in extractors (short.icu etc.)
                 try {
-                    if (loadExtractor(url, mainUrl, subtitleCallback, callback)) {
+                    if (mediaUrl.contains(".m3u8")) {
+                        callback.invoke(
+                            ExtractorLink(
+                                name,
+                                label,
+                                mediaUrl,
+                                mainUrl + "/",
+                                qualityToInt(quality),
+                                true
+                            )
+                        )
                         found = true
                         continue
                     }
+
+                    if (mediaUrl.contains(".mp4")) {
+                        callback.invoke(
+                            ExtractorLink(
+                                name,
+                                label,
+                                mediaUrl,
+                                mainUrl + "/",
+                                qualityToInt(quality),
+                                false
+                            )
+                        )
+                        found = true
+                        continue
+                    }
+
+                    try {
+                        if (loadExtractor(mediaUrl, mainUrl, subtitleCallback, callback)) {
+                            found = true
+                            continue
+                        }
+                    } catch (_: Exception) {
+                    }
+
+                    // last resort: try open page for m3u8
+                    try {
+                        val body = app.get(mediaUrl, headers = headers).text
+                        val re = Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*")
+                        re.findAll(body).forEach { m ->
+                            callback.invoke(
+                                ExtractorLink(
+                                    name,
+                                    label,
+                                    m.value,
+                                    mediaUrl,
+                                    Qualities.Unknown.value,
+                                    true
+                                )
+                            )
+                            found = true
+                        }
+                    } catch (_: Exception) {
+                    }
                 } catch (_: Exception) {
                 }
-
-                // Generic page scrape
-                val body = app.get(url, headers = headers).text
-                val reM3u8 = Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*")
-                var got = false
-                reM3u8.findAll(body).forEach { m ->
-                    callback.invoke(
-                        ExtractorLink(name, label, m.value, url, Qualities.Unknown.value, true)
-                    )
-                    found = true
-                    got = true
-                }
-                if (!got) {
-                    // still list as link fallback
-                    callback.invoke(
-                        ExtractorLink(name, label, url, mainUrl, Qualities.Unknown.value, false)
-                    )
-                    found = true
-                }
-            } catch (_: Exception) {
-                continue
             }
         }
 
-        // MegaPlay fallback (AniStream) if anilistId known
+        // MegaPlay backup
         if (realAnilist > 0) {
             for (type in listOf("sub", "dub")) {
                 try {
@@ -352,24 +390,61 @@ class AnimeLokProvider : MainAPI() {
         return found
     }
 
-    /** megaplay.buzz/stream/ani/{anilistId}/{ep}/sub|dub -> getSources m3u8 */
+    /** url can be normal link OR JSON array string of {url, quality} */
+    private fun expandUrls(raw: String): List<Pair<String, String>> {
+        val t = raw.trim()
+        val out = ArrayList<Pair<String, String>>()
+
+        if (t.startsWith("[")) {
+            try {
+                val arr = parseJson<List<PaheItem>>(t)
+                for (item in arr) {
+                    val u = item.url ?: continue
+                    out.add((item.quality ?: "") to u)
+                }
+            } catch (_: Exception) {
+                // regex fallback
+                val re = Regex("\"url\"\\s*:\\s*\"(https?://[^\"]+)\"")
+                val rq = Regex("\"quality\"\\s*:\\s*\"([^\"]+)\"")
+                val qualities = rq.findAll(t).map { it.groupValues[1] }.toList()
+                var i = 0
+                re.findAll(t).forEach { m ->
+                    val q = qualities.getOrNull(i) ?: ""
+                    out.add(q to m.groupValues[1].replace("\\/", "/"))
+                    i++
+                }
+            }
+        } else if (t.startsWith("http")) {
+            out.add("" to t)
+        }
+        return out
+    }
+
+    private fun qualityToInt(q: String): Int {
+        return when {
+            q.contains("1080") -> Qualities.P1080.value
+            q.contains("720") -> Qualities.P720.value
+            q.contains("480") -> Qualities.P480.value
+            q.contains("360") -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
     private suspend fun extractMegaPlay(
         anilistId: Int,
         epNum: Int,
         type: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val streamPage = "https://megaplay.buzz/stream/ani/" + anilistId + "/" + epNum + "/" + type
+        val streamPage =
+            "https://megaplay.buzz/stream/ani/" + anilistId + "/" + epNum + "/" + type
         val mpHtml = app.get(
             streamPage,
-            headers = mapOf(
-                "User-Agent" to ua,
-                "Referer" to mainUrl
-            )
+            headers = mapOf("User-Agent" to ua, "Referer" to mainUrl)
         ).text
 
-        var playerId = Regex("data-id=\"([0-9]+)\"").find(mpHtml)?.groupValues?.getOrNull(1)
-        if (playerId.isNullOrBlank()) return false
+        val playerId = Regex("data-id=\"([0-9]+)\"").find(mpHtml)?.groupValues?.getOrNull(1)
+            ?: return false
 
         val sourcesJson = app.get(
             "https://megaplay.buzz/stream/getSources?id=" + playerId,
@@ -381,8 +456,10 @@ class AnimeLokProvider : MainAPI() {
             )
         ).text
 
-        val file = Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"").find(sourcesJson)
-            ?.groupValues?.getOrNull(1)
+        val file = Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"")
+            .find(sourcesJson)
+            ?.groupValues
+            ?.getOrNull(1)
             ?.replace("\\/", "/")
             ?: return false
 
@@ -399,21 +476,18 @@ class AnimeLokProvider : MainAPI() {
         return true
     }
 
-    // ---- JSON models ----
     private data class EpResponse(
         @JsonProperty("anime") val anime: AnimeInfo? = null,
         @JsonProperty("episode") val episode: EpisodeInfo? = null
     )
 
     private data class AnimeInfo(
-        @JsonProperty("id") val id: Int? = null,
         @JsonProperty("anilistId") val anilistId: Int? = null,
         @JsonProperty("slug") val slug: String? = null,
         @JsonProperty("title") val title: String? = null
     )
 
     private data class EpisodeInfo(
-        @JsonProperty("id") val id: Int? = null,
         @JsonProperty("number") val number: Int? = null,
         @JsonProperty("name") val name: String? = null,
         @JsonProperty("img") val img: String? = null,
@@ -421,7 +495,6 @@ class AnimeLokProvider : MainAPI() {
     )
 
     private data class ServerInfo(
-        @JsonProperty("id") val id: Int? = null,
         @JsonProperty("name") val name: String? = null,
         @JsonProperty("tip") val tip: String? = null,
         @JsonProperty("url") val url: String? = null,
@@ -434,7 +507,11 @@ class AnimeLokProvider : MainAPI() {
     )
 
     private data class RangeEp(
-        @JsonProperty("number") val number: Int? = null,
-        @JsonProperty("name") val name: String? = null
+        @JsonProperty("number") val number: Int? = null
+    )
+
+    private data class PaheItem(
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("quality") val quality: String? = null
     )
 }
