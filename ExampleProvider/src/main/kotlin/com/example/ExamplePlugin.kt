@@ -6,13 +6,10 @@ import com.lagradost.cloudstream3.plugins.Plugin
 
 @CloudstreamPlugin
 class ExamplePlugin : Plugin() {
-
     override fun load(context: Context) {
         registerMainAPI(AnimeThProvider())
         registerMainAPI(AnimeHDProvider())
         registerMainAPI(AnimeSaltProvider())
-
-        // New AnimeDrive provider
         registerMainAPI(AnimeDriveProvider())
     }
 }
