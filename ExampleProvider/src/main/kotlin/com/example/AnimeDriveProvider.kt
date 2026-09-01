@@ -2,7 +2,6 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.app
 import org.jsoup.nodes.Element
 
 class AnimeDriveProvider : MainAPI() {
@@ -18,7 +17,7 @@ class AnimeDriveProvider : MainAPI() {
         val home = document.select("article, .post-item, .item, .result-item").mapNotNull {
             it.toSearchResult()
         }
-        return newHomePageResponse(name = request.name, list = home)
+        return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -32,7 +31,7 @@ class AnimeDriveProvider : MainAPI() {
         
         if (title.isBlank() || href.isBlank()) return null
 
-        return newAnimeSearchResponse(name = title, url = href, type = TvType.Anime) {
+        return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
     }
@@ -75,13 +74,13 @@ class AnimeDriveProvider : MainAPI() {
 
         val episodesList = epMap.map { (epNum, links) ->
             val dataString = links.joinToString("|||") { "${it.first}:::${it.second}" }
-            newEpisode(data = dataString) {
+            newEpisode(dataString) {
                 this.name = "Episode $epNum"
                 this.episode = epNum
             }
         }
 
-        return newAnimeLoadResponse(name = title, url = url, type = TvType.Anime) {
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
             this.episodes = if (episodesList.isEmpty()) {
@@ -91,7 +90,7 @@ class AnimeDriveProvider : MainAPI() {
                 
                 if (fallbackLinks.isNotEmpty()) {
                     val dataString = fallbackLinks.joinToString("|||") { "${it.first}:::${it.second}" }
-                    listOf(newEpisode(data = dataString) {
+                    listOf(newEpisode(dataString) {
                         this.name = "Movie / Batch"
                         this.episode = 1
                     })
@@ -136,17 +135,18 @@ class AnimeDriveProvider : MainAPI() {
                     if (id.isNotBlank()) {
                         callback(
                             ExtractorLink(
-                                source = "Pixeldrain",
-                                name = "Pixeldrain - $sourceName",
-                                url = "https://pixeldrain.com/api/file/$id",
-                                referer = "",
-                                quality = Qualities.Unknown.value
+                                "Pixeldrain",
+                                "Pixeldrain - $sourceName",
+                                "https://pixeldrain.com/api/file/$id",
+                                "",
+                                Qualities.Unknown.value,
+                                false
                             )
                         )
                     }
                 }
                 else -> {
-                    loadExtractor(url = finalUrl, subtitleCallback = subtitleCallback, callback = callback)
+                    loadExtractor(finalUrl, subtitleCallback, callback)
                 }
             }
         } catch (e: Exception) {
@@ -174,15 +174,16 @@ class AnimeDriveProvider : MainAPI() {
                     if (text.contains("10gbps") || text.contains("fsl") || text.contains("download file") || text.contains("gpdl")) {
                          callback(
                              ExtractorLink(
-                                 source = "HubCloud",
-                                 name = "HubCloud ($sourceName) - ${a.text().trim()}",
-                                 url = href,
-                                 referer = "",
-                                 quality = Qualities.Unknown.value
+                                 "HubCloud",
+                                 "HubCloud ($sourceName) - ${a.text().trim()}",
+                                 href,
+                                 "",
+                                 Qualities.Unknown.value,
+                                 false
                              )
                          )
                     } else if (text.contains("gofile") || text.contains("pixeldrain") || text.contains("drive")) {
-                         loadExtractor(url = href, subtitleCallback = subtitleCallback, callback = callback)
+                         loadExtractor(href, subtitleCallback, callback)
                     }
                 }
             }
