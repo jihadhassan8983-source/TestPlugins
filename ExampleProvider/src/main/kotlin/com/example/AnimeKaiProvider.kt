@@ -26,24 +26,27 @@ class AnimeKaiProvider : MainAPI() {
         "User-Agent" to ua,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9",
-        "Referer" to "$mainUrl/"
+        "Referer" to (mainUrl + "/")
     )
 
-    private val ajaxHeaders = headers + mapOf(
-        "X-Requested-With" to "XMLHttpRequest",
-        "Accept" to "application/json, text/javascript, */*; q=0.01"
+    private val ajaxHeaders = mapOf(
+        "User-Agent" to ua,
+        "Accept" to "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Referer" to (mainUrl + "/"),
+        "X-Requested-With" to "XMLHttpRequest"
     )
 
     override val mainPage = mainPageOf(
         "latest-updates" to "Latest",
         "sub-updates" to "Subbed",
         "dub-updates" to "Dubbed",
-        "$mainUrl/genres/action" to "Action",
-        "$mainUrl/genres/romance" to "Romance",
-        "$mainUrl/genres/isekai" to "Isekai",
-        "$mainUrl/genres/school" to "School",
-        "$mainUrl/genres/shounen" to "Shounen",
-        "$mainUrl/browse?status=completed" to "Completed"
+        (mainUrl + "/genres/action") to "Action",
+        (mainUrl + "/genres/romance") to "Romance",
+        (mainUrl + "/genres/isekai") to "Isekai",
+        (mainUrl + "/genres/school") to "School",
+        (mainUrl + "/genres/shounen") to "Shounen",
+        (mainUrl + "/browse?status=completed") to "Completed"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -51,110 +54,151 @@ class AnimeKaiProvider : MainAPI() {
         val list: List<SearchResponse>
 
         if (!key.startsWith("http")) {
-            // ajax home tabs
             if (page > 1) {
                 return newHomePageResponse(request.name, emptyList(), false)
             }
-            val json = app.get(
-                "$mainUrl/ajax/home/items?id=$key",
+            val raw = app.get(
+                mainUrl + "/ajax/home/items?id=" + key,
                 headers = ajaxHeaders
             ).text
-            val html = try {
-                parseJson<HomeAjax>(json).html ?: ""
-            } catch (_: Exception) {
-                // sometimes raw html
-                json
+
+            val html: String = try {
+                val parsed = parseJson<HomeAjax>(raw)
+                parsed.html ?: ""
+            } catch (e: Exception) {
+                raw
             }
+
             val doc = Jsoup.parse(html)
-            list = doc.select("div.aitem").mapNotNull { it.toSearchResult() }
+            list = doc.select("div.aitem").mapNotNull { el ->
+                toSearchResult(el)
+            }
         } else {
-            val url = if (page <= 1) key else {
-                val sep = if (key.contains("?")) "&" else "?"
-                "\( key \){sep}page=$page"
+            val url: String = if (page <= 1) {
+                key
+            } else if (key.contains("?")) {
+                key + "&page=" + page
+            } else {
+                key + "?page=" + page
             }
             val doc = app.get(url, headers = headers).document
-            list = doc.select("div.aitem").mapNotNull { it.toSearchResult() }
+            list = doc.select("div.aitem").mapNotNull { el ->
+                toSearchResult(el)
+            }
         }
 
-        return newHomePageResponse(request.name, list.distinctBy { it.url }, list.isNotEmpty())
+        val unique = list.distinctBy { it.url }
+        return newHomePageResponse(request.name, unique, unique.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = URLEncoder.encode(query, "UTF-8")
-        val doc = app.get("$mainUrl/browse?keyword=$q", headers = headers).document
-        return doc.select("div.aitem").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+        val doc = app.get(mainUrl + "/browse?keyword=" + q, headers = headers).document
+        return doc.select("div.aitem").mapNotNull { el ->
+            toSearchResult(el)
+        }.distinctBy { it.url }
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val a = this.selectFirst("a.title, a.poster") ?: return null
-        var href = a.attr("abs:href")
-        if (href.isBlank()) href = a.attr("href")
-        if (href.isBlank() || !href.contains("/watch/")) return null
-        // normalize to series page (strip /ep-N)
-        href = href.replace(Regex("/ep-\\d+/?$"), "").trimEnd('/')
+    private fun toSearchResult(el: Element): SearchResponse? {
+        val a = el.selectFirst("a.title") ?: el.selectFirst("a.poster") ?: return null
 
-        val title = this.selectFirst("a.title")?.attr("title")
-            ?: this.selectFirst("a.title")?.text()
-            ?: a.attr("title")
-            ?: return null
+        var href: String = a.attr("abs:href")
+        if (href.isBlank()) {
+            href = a.attr("href")
+        }
+        if (href.isBlank()) return null
+        if (!href.contains("/watch/")) return null
+
+        // strip /ep-N
+        val epRegex = Regex("/ep-[0-9]+/?$")
+        href = epRegex.replace(href, "").trimEnd('/')
+
+        var title: String = a.attr("title")
+        if (title.isBlank()) {
+            title = a.text().trim()
+        }
+        val titleEl = el.selectFirst("a.title")
+        if (title.isBlank() && titleEl != null) {
+            title = titleEl.attr("title")
+            if (title.isBlank()) title = titleEl.text().trim()
+        }
         if (title.isBlank()) return null
 
-        val poster = this.selectFirst("img")?.let {
-            it.attr("abs:src").ifBlank { it.attr("src") }
+        val img = el.selectFirst("img")
+        var poster: String? = null
+        if (img != null) {
+            poster = img.attr("abs:src")
+            if (poster.isNullOrBlank()) poster = img.attr("src")
         }
 
         val isMovie = title.contains("Movie", true) || title.contains("Film", true)
 
         return if (isMovie) {
-            newMovieSearchResponse(title.trim(), href, TvType.AnimeMovie) {
+            newMovieSearchResponse(title, href, TvType.AnimeMovie) {
                 this.posterUrl = poster
             }
         } else {
-            newAnimeSearchResponse(title.trim(), href, TvType.Anime) {
+            newAnimeSearchResponse(title, href, TvType.Anime) {
                 this.posterUrl = poster
             }
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val cleanUrl = url.replace(Regex("/ep-\\d+/?$"), "").trimEnd('/')
+        val epStrip = Regex("/ep-[0-9]+/?$")
+        val cleanUrl = epStrip.replace(url, "").trimEnd('/')
+
         val doc = app.get(cleanUrl, headers = headers).document
 
-        val title = doc.selectFirst("h1, .title, .anime-title, .detail .title")?.text()?.trim()
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: cleanUrl.substringAfterLast("/")
+        var title = doc.selectFirst("h1")?.text()?.trim()
+        if (title.isNullOrBlank()) {
+            title = doc.selectFirst(".detail .title, .anime-title")?.text()?.trim()
+        }
+        if (title.isNullOrBlank()) {
+            title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+        }
+        if (title.isNullOrBlank()) {
+            title = cleanUrl.substringAfterLast("/")
+        }
 
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst(".poster img, .detail img, img.poster")?.attr("abs:src")
+        var poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+        if (poster.isNullOrBlank()) {
+            poster = doc.selectFirst(".poster img, img.poster")?.attr("abs:src")
+        }
 
-        val plot = doc.selectFirst(".desc, .description, .synopsis, meta[name=description]")
-            ?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
-            ?.trim()
+        var plot = doc.selectFirst("meta[name=description]")?.attr("content")?.trim()
+        if (plot.isNullOrBlank()) {
+            plot = doc.selectFirst(".desc, .description, .synopsis")?.text()?.trim()
+        }
 
-        // Episodes: /watch/slug/ep-1, ep-2, ...
+        val slug = cleanUrl.substringAfterLast("/")
         val epLinks = doc.select("a[href*=/watch/]")
-            .map { it.attr("abs:href").ifBlank { it.attr("href") } }
-            .filter { it.contains(cleanUrl.substringAfterLast("/")) && it.contains("/ep-") }
+            .map { link ->
+                var h = link.attr("abs:href")
+                if (h.isBlank()) h = link.attr("href")
+                h
+            }
+            .filter { h -> h.contains(slug) && h.contains("/ep-") }
             .distinct()
-            .sortedBy {
-                Regex("/ep-(\\d+)").find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+            .sortedBy { h ->
+                val m = Regex("/ep-([0-9]+)").find(h)
+                m?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
             }
 
         val episodes = ArrayList<Episode>()
         if (epLinks.isNotEmpty()) {
             for (epUrl in epLinks) {
-                val num = Regex("/ep-(\\d+)").find(epUrl)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                    ?: continue
+                val m = Regex("/ep-([0-9]+)").find(epUrl)
+                val num = m?.groupValues?.getOrNull(1)?.toIntOrNull() ?: continue
                 episodes.add(
                     newEpisode(epUrl) {
-                        this.name = "Episode $num"
+                        this.name = "Episode " + num
                         this.episode = num
                         this.season = 1
                     }
                 )
             }
         } else {
-            // single page with servers only (movie / ep1)
             episodes.add(
                 newEpisode(cleanUrl) {
                     this.name = "Episode 1"
@@ -163,10 +207,12 @@ class AnimeKaiProvider : MainAPI() {
             )
         }
 
-        val isMovie = title.contains("Movie", true) || title.contains("Film", true) || episodes.size <= 1
+        val isMovie = title.contains("Movie", true) ||
+                title.contains("Film", true) ||
+                episodes.size <= 1
 
         return if (isMovie) {
-            newMovieLoadResponse(title, cleanUrl, TvType.AnimeMovie, episodes.first().data ?: cleanUrl) {
+            newMovieLoadResponse(title, cleanUrl, TvType.AnimeMovie, episodes[0].data ?: cleanUrl) {
                 this.posterUrl = poster
                 this.plot = plot
             }
@@ -186,42 +232,40 @@ class AnimeKaiProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data, headers = headers).document
-
-        // server buttons: data-url = megaplay.buzz/stream/...
-        val servers = doc.select(".server[data-url], span.server[data-url]")
+        val servers = doc.select("span.server[data-url], .server[data-url]")
         if (servers.isEmpty()) return false
 
         var found = false
 
         for (server in servers) {
             val streamPage = server.attr("data-url").trim()
-            if (streamPage.isBlank() || !streamPage.startsWith("http")) continue
+            if (streamPage.isBlank()) continue
+            if (!streamPage.startsWith("http")) continue
 
-            val label = server.text().trim().ifBlank {
-                when {
-                    streamPage.endsWith("/dub") -> "Dub"
-                    streamPage.endsWith("/sub") -> "Sub"
-                    else -> "Server"
-                }
-            }
             val isDub = streamPage.contains("/dub")
+            var label = server.text().trim()
+            if (label.isBlank()) {
+                label = if (isDub) "Dub" else "Sub"
+            }
 
             try {
-                // Open MegaPlay page → get player data-id
                 val mpDoc = app.get(
                     streamPage,
                     headers = headers + mapOf("Referer" to mainUrl)
                 ).document
 
-                val playerId = mpDoc.selectFirst("#megaplay-player[data-id], [data-id][data-mediaid]")
-                    ?.attr("data-id")
-                    ?: Regex("""data-id=["'](\d+)["']""").find(mpDoc.html())?.groupValues?.getOrNull(1)
-
+                var playerId = mpDoc.selectFirst("#megaplay-player")?.attr("data-id")
+                if (playerId.isNullOrBlank()) {
+                    playerId = mpDoc.selectFirst("[data-id][data-mediaid]")?.attr("data-id")
+                }
+                if (playerId.isNullOrBlank()) {
+                    val idMatch = Regex("data-id=\"([0-9]+)\"").find(mpDoc.html())
+                    playerId = idMatch?.groupValues?.getOrNull(1)
+                }
                 if (playerId.isNullOrBlank()) continue
 
-                // getSources → m3u8
                 val sourcesJson = app.get(
-                    "https://megaplay.buzz/stream/getSources?id=$playerId",
+                    "https://megaplay.buzz/stream/getSources?id=" + playerId,
                     headers = mapOf(
                         "User-Agent" to ua,
                         "Referer" to streamPage,
@@ -232,7 +276,7 @@ class AnimeKaiProvider : MainAPI() {
 
                 val parsed = try {
                     parseJson<MegaSources>(sourcesJson)
-                } catch (_: Exception) {
+                } catch (e: Exception) {
                     null
                 } ?: continue
 
@@ -240,11 +284,12 @@ class AnimeKaiProvider : MainAPI() {
                 if (file.isNullOrBlank()) continue
 
                 val isM3u8 = file.contains(".m3u8", true)
+                val nameLabel = if (isDub) ("Dub - " + label) else ("Sub - " + label)
 
                 callback.invoke(
                     ExtractorLink(
                         name,
-                        if (isDub) "Dub • $label" else "Sub • $label",
+                        nameLabel,
                         file,
                         "https://megaplay.buzz/",
                         Qualities.Unknown.value,
@@ -253,19 +298,21 @@ class AnimeKaiProvider : MainAPI() {
                 )
                 found = true
 
-                // subtitles
-                parsed.tracks?.forEach { track ->
-                    val subFile = track.file ?: return@forEach
-                    val subLabel = track.label ?: "Subtitle"
-                    try {
-                        subtitleCallback.invoke(
-                            SubtitleFile(subLabel, subFile)
-                        )
-                    } catch (_: Exception) {
+                val tracks = parsed.tracks
+                if (tracks != null) {
+                    for (track in tracks) {
+                        val subFile = track.file
+                        if (subFile.isNullOrBlank()) continue
+                        val subLabel = track.label ?: "English"
+                        try {
+                            subtitleCallback.invoke(SubtitleFile(subLabel, subFile))
+                        } catch (e: Exception) {
+                            // ignore
+                        }
                     }
                 }
-            } catch (_: Exception) {
-                // try next server
+            } catch (e: Exception) {
+                // next server
             }
         }
         return found
