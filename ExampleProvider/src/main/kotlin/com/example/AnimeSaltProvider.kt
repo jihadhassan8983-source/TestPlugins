@@ -24,8 +24,7 @@ class AnimeSaltProvider : MainAPI() {
             "User-Agent" to ua,
             "Accept" to "*/*",
             "Accept-Language" to "en-US,en;q=0.9",
-            "Referer" to ref,
-            "Origin" to mainUrl
+            "Referer" to ref
         )
     }
 
@@ -69,9 +68,7 @@ class AnimeSaltProvider : MainAPI() {
             if (!seen.add(href)) return@forEach
 
             var title = a.selectFirst("h3")?.text()?.trim().orEmpty()
-            if (title.isBlank()) {
-                title = a.selectFirst("img")?.attr("alt")?.trim().orEmpty()
-            }
+            if (title.isBlank()) title = a.selectFirst("img")?.attr("alt")?.trim().orEmpty()
             if (title.isBlank()) {
                 title = href.trimEnd('/').substringAfterLast('/').replace("-", " ")
             }
@@ -97,8 +94,7 @@ class AnimeSaltProvider : MainAPI() {
             doc.select("a[href*=/tv/]").forEach { a ->
                 var href = a.attr("abs:href")
                 if (href.isBlank()) href = a.attr("href")
-                if (href.isBlank()) return@forEach
-                if (!href.contains("/tv/")) return@forEach
+                if (href.isBlank() || !href.contains("/tv/")) return@forEach
                 href = href.substringBefore("?").trimEnd('/') + "/"
                 if (!seen.add(href)) return@forEach
                 val title = clean(a.text().trim())
@@ -112,9 +108,7 @@ class AnimeSaltProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (request.data == mainUrl + "/" || request.data == mainUrl) {
-            if (page > 1) {
-                return newHomePageResponse(request.name, emptyList(), false)
-            }
+            if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
             request.data
         } else {
             pageUrl(request.data, page)
@@ -161,14 +155,16 @@ class AnimeSaltProvider : MainAPI() {
         val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
             ?: doc.selectFirst(".entry-content p")?.text()
 
+        // IMPORTANT: save server JSON in episode data (not page||ep)
         val episodes = ArrayList<Episode>()
         val re = Regex(
-            "triggerEpisode\\(\\[(.*?)]\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"(ep-\\d+)\"",
+            "triggerEpisode\\(\\[(.*?)\\]\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"(ep-\\d+)\"",
             RegexOption.DOT_MATCHES_ALL
         )
         var idx = 0
         re.findAll(html).forEach { m ->
             idx++
+            val serverJson = m.groupValues[1]
             val epName = clean(m.groupValues[2])
             var epNum = Regex("(\\d+)").find(m.groupValues[3])?.groupValues?.get(1)?.toIntOrNull()
             if (epNum == null) {
@@ -176,8 +172,9 @@ class AnimeSaltProvider : MainAPI() {
             }
             if (epNum == null) epNum = idx
 
+            // data = the raw servers array content
             episodes.add(
-                newEpisode(page + "||" + epNum) {
+                newEpisode(serverJson) {
                     this.name = epName
                     this.episode = epNum
                 }
@@ -185,7 +182,7 @@ class AnimeSaltProvider : MainAPI() {
         }
 
         if (episodes.isEmpty()) {
-            return newMovieLoadResponse(title, page, TvType.AnimeMovie, page + "||1") {
+            return newMovieLoadResponse(title, page, TvType.AnimeMovie, "") {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = poster
                 this.plot = plot
@@ -207,49 +204,31 @@ class AnimeSaltProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var pageUrl = data
-        var epNum = 1
-        if (data.contains("||")) {
-            val p = data.split("||")
-            pageUrl = p[0]
-            epNum = p.getOrNull(1)?.toIntOrNull() ?: 1
-        }
-        if (!pageUrl.endsWith("/")) {
-            pageUrl = pageUrl + "/"
-        }
+        if (data.isBlank()) return false
 
-        val html = clean(app.get(pageUrl, headers = hdr()).text)
+        // data is already the server list JSON chunk
+        val block = clean(data)
+
         val servers = ArrayList<Pair<String, String>>()
+        val reUrl = Regex("\"url\"\\s*:\\s*\"(https?://[^\"]+)\"")
 
-        val re = Regex(
-            "triggerEpisode\\(\\[(.*?)]\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"(ep-\\d+)\"",
-            RegexOption.DOT_MATCHES_ALL
-        )
-        val reUrl = Regex("\"url\"\\s*:\\s*\"(https?:\\\\?/\\\\?/[^\"]+)\"")
-
-        re.findAll(html).forEach { m ->
-            val block = m.groupValues[1]
-            val thisEp = Regex("(\\d+)").find(m.groupValues[3])?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            if (thisEp != epNum) return@forEach
-
-            reUrl.findAll(block).forEach { um ->
-                val u = um.groupValues[1].replace("\\/", "/")
-                val chunkStart = maxOf(0, um.range.first - 150)
-                val chunkEnd = minOf(block.length, um.range.last + 20)
-                val chunk = block.substring(chunkStart, chunkEnd)
-                val lang = Regex("\"lang\"\\s*:\\s*\"([^\"]+)\"").find(chunk)?.groupValues?.get(1) ?: ""
-                val sname = Regex("\"name\"\\s*:\\s*\"([^\"]+)\"").find(chunk)?.groupValues?.get(1) ?: "HD"
-                val label = if (lang.isNotBlank()) (lang + " " + sname) else sname
-                servers.add(label to u)
-            }
+        reUrl.findAll(block).forEach { um ->
+            val u = um.groupValues[1].replace("\\/", "/")
+            val start = maxOf(0, um.range.first - 120)
+            val end = minOf(block.length, um.range.last + 15)
+            val chunk = block.substring(start, end)
+            val lang = Regex("\"lang\"\\s*:\\s*\"([^\"]+)\"").find(chunk)?.groupValues?.get(1) ?: ""
+            val sname = Regex("\"name\"\\s*:\\s*\"([^\"]+)\"").find(chunk)?.groupValues?.get(1) ?: "HD"
+            val label = if (lang.isNotBlank()) (lang + " " + sname) else sname
+            servers.add(label to u)
         }
 
+        // ultra fallback: any http link in data
         if (servers.isEmpty()) {
-            re.findAll(html).forEach { m ->
-                val thisEp = Regex("(\\d+)").find(m.groupValues[3])?.groupValues?.get(1)?.toIntOrNull()
-                if (thisEp != null && thisEp != epNum) return@forEach
-                reUrl.findAll(m.groupValues[1]).forEach { um ->
-                    val u = um.groupValues[1].replace("\\/", "/")
+            val reAny = Regex("https?://[^\\s\"'<>]+")
+            reAny.findAll(block).forEach { m ->
+                val u = m.value
+                if (u.contains("embed") || u.contains("vidmoly") || u.contains("player") || u.contains("mirror")) {
                     servers.add("Server" to u)
                 }
             }
@@ -258,11 +237,13 @@ class AnimeSaltProvider : MainAPI() {
         if (servers.isEmpty()) return false
 
         var found = false
+
         for ((label, embedRaw) in servers.distinctBy { it.second }) {
-            val embed = embedRaw.replace("\\/", "/").trim()
-            if (embed.isBlank()) continue
+            val embed = embedRaw.trim()
+            if (embed.isBlank() || !embed.startsWith("http")) continue
 
             try {
+                // 1) Vidmoly - main working host
                 if (embed.contains("vidmoly", true)) {
                     if (extractVidmoly(embed, label, callback)) {
                         found = true
@@ -270,6 +251,7 @@ class AnimeSaltProvider : MainAPI() {
                     }
                 }
 
+                // 2) CloudStream built-in extractors
                 try {
                     if (loadExtractor(embed, mainUrl + "/", subtitleCallback, callback)) {
                         found = true
@@ -278,8 +260,10 @@ class AnimeSaltProvider : MainAPI() {
                 } catch (_: Exception) {
                 }
 
+                // 3) Generic m3u8 from embed page
                 val body = app.get(embed, headers = hdr(mainUrl + "/")).text
                 val m3u8s = LinkedHashSet<String>()
+
                 val reM3u8 = Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*")
                 reM3u8.findAll(body).forEach { m3u8s.add(it.value) }
 
@@ -291,24 +275,22 @@ class AnimeSaltProvider : MainAPI() {
 
                 for (src in m3u8s) {
                     callback.invoke(
-                        ExtractorLink(name, label, src, embed, Qualities.Unknown.value, true)
+                        ExtractorLink(
+                            name,
+                            label,
+                            src,
+                            embed,
+                            Qualities.Unknown.value,
+                            true
+                        )
                     )
                     found = true
-                }
-
-                if (m3u8s.isEmpty()) {
-                    val reMp4 = Regex("https?://[^\\s\"'<>]+\\.mp4[^\\s\"'<>]*")
-                    reMp4.findAll(body).forEach { mm ->
-                        callback.invoke(
-                            ExtractorLink(name, label, mm.value, embed, Qualities.Unknown.value, false)
-                        )
-                        found = true
-                    }
                 }
             } catch (_: Exception) {
                 continue
             }
         }
+
         return found
     }
 
@@ -321,7 +303,8 @@ class AnimeSaltProvider : MainAPI() {
             embed,
             headers = mapOf(
                 "User-Agent" to ua,
-                "Referer" to (mainUrl + "/")
+                "Referer" to (mainUrl + "/"),
+                "Accept" to "*/*"
             )
         ).text
 
@@ -333,9 +316,7 @@ class AnimeSaltProvider : MainAPI() {
         val re2 = Regex("file:\\s*[\"']([^\"']+)[\"']")
         re2.findAll(html).forEach { m ->
             val u = m.groupValues[1]
-            if (u.contains(".m3u8") || u.startsWith("http")) {
-                sources.add(u)
-            }
+            if (u.contains(".m3u8")) sources.add(u)
         }
 
         if (sources.isEmpty()) return false
