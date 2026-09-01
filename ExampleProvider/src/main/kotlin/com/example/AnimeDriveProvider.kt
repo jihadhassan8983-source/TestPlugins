@@ -11,7 +11,7 @@ class AnimeDriveProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
+    override val supportedTypes = setOf(TvType.Anime, TvType.Movie) // Fixed TvType
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get("$mainUrl/page/$page/").document
@@ -112,19 +112,26 @@ class AnimeDriveProvider : MainAPI() {
             if (parts.isNotEmpty()) {
                 val url = parts[0]
                 val sourceName = parts.getOrNull(1) ?: "Unknown Hoster"
-                bypassAndExtract(url, sourceName, callback)
+                // Fixed: Passing subtitleCallback here
+                bypassAndExtract(url, sourceName, callback, subtitleCallback)
             }
         }
     }
 
-    private suspend fun bypassAndExtract(url: String, sourceName: String, callback: (ExtractorLink) -> Unit) {
+    // Fixed: Added subtitleCallback parameter to the function
+    private suspend fun bypassAndExtract(
+        url: String, 
+        sourceName: String, 
+        callback: (ExtractorLink) -> Unit,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
         try {
             val response = app.get(url, allowRedirects = true)
             val finalUrl = response.url
 
             when {
                 finalUrl.contains("hubcloud") || finalUrl.contains("hubdrive") || finalUrl.contains("drivehub") -> {
-                    extractHubCloud(finalUrl, sourceName, callback)
+                    extractHubCloud(finalUrl, sourceName, callback, subtitleCallback)
                 }
                 finalUrl.contains("pixeldrain.com") -> {
                     val id = finalUrl.substringAfter("u/").substringAfter("file/").substringBefore("?")
@@ -134,13 +141,14 @@ class AnimeDriveProvider : MainAPI() {
                             "Pixeldrain",
                             "https://pixeldrain.com/api/file/$id",
                             "",
-                            Quality.Unknown.value,
+                            com.lagradost.cloudstream3.utils.Qualities.Unknown.value, // Fixed: Qualities with 's'
                             false
                         ))
                     }
                 }
                 else -> {
-                    loadExtractor(finalUrl, callback)
+                    // Fixed: loadExtractor requires subtitleCallback
+                    com.lagradost.cloudstream3.utils.loadExtractor(finalUrl, subtitleCallback, callback)
                 }
             }
         } catch (e: Exception) {
@@ -148,7 +156,12 @@ class AnimeDriveProvider : MainAPI() {
         }
     }
 
-    private suspend fun extractHubCloud(url: String, sourceName: String, callback: (ExtractorLink) -> Unit) {
+    private suspend fun extractHubCloud(
+        url: String, 
+        sourceName: String, 
+        callback: (ExtractorLink) -> Unit,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
         try {
             val doc = app.get(url).document
             val links = doc.select("a").map { it.attr("href") }.filter { it.startsWith("http") }
@@ -166,11 +179,11 @@ class AnimeDriveProvider : MainAPI() {
                              "HubCloud",
                              href,
                              "",
-                             Quality.Unknown.value,
+                             com.lagradost.cloudstream3.utils.Qualities.Unknown.value, // Fixed: Qualities with 's'
                              false
                          ))
                     } else if (text.contains("gofile") || text.contains("pixeldrain") || text.contains("drive")) {
-                         loadExtractor(href, callback)
+                         com.lagradost.cloudstream3.utils.loadExtractor(href, subtitleCallback, callback) // Fixed
                     }
                 }
             }
