@@ -11,7 +11,7 @@ class AnimeDriveProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Anime, TvType.Movie) // Fixed TvType
+    override val supportedTypes = setOf(TvType.Anime, TvType.Movie)
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get("$mainUrl/page/$page/").document
@@ -112,13 +112,11 @@ class AnimeDriveProvider : MainAPI() {
             if (parts.isNotEmpty()) {
                 val url = parts[0]
                 val sourceName = parts.getOrNull(1) ?: "Unknown Hoster"
-                // Fixed: Passing subtitleCallback here
                 bypassAndExtract(url, sourceName, callback, subtitleCallback)
             }
         }
     }
 
-    // Fixed: Added subtitleCallback parameter to the function
     private suspend fun bypassAndExtract(
         url: String, 
         sourceName: String, 
@@ -141,14 +139,13 @@ class AnimeDriveProvider : MainAPI() {
                             "Pixeldrain",
                             "https://pixeldrain.com/api/file/$id",
                             "",
-                            com.lagradost.cloudstream3.utils.Qualities.Unknown.value, // Fixed: Qualities with 's'
+                            Qualities.Unknown.value,
                             false
                         ))
                     }
                 }
                 else -> {
-                    // Fixed: loadExtractor requires subtitleCallback
-                    com.lagradost.cloudstream3.utils.loadExtractor(finalUrl, subtitleCallback, callback)
+                    loadExtractor(finalUrl, subtitleCallback, callback)
                 }
             }
         } catch (e: Exception) {
@@ -179,11 +176,11 @@ class AnimeDriveProvider : MainAPI() {
                              "HubCloud",
                              href,
                              "",
-                             com.lagradost.cloudstream3.utils.Qualities.Unknown.value, // Fixed: Qualities with 's'
+                             Qualities.Unknown.value,
                              false
                          ))
                     } else if (text.contains("gofile") || text.contains("pixeldrain") || text.contains("drive")) {
-                         com.lagradost.cloudstream3.utils.loadExtractor(href, subtitleCallback, callback) // Fixed
+                         loadExtractor(href, subtitleCallback, callback)
                     }
                 }
             }
