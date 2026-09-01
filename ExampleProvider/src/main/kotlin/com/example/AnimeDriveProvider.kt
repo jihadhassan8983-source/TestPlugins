@@ -1,24 +1,25 @@
+@file:Suppress("DEPRECATION_ERROR", "DEPRECATION")
+
 package com.example
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import org.jsoup.nodes.Element
+import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
 class AnimeDriveProvider : MainAPI() {
 
     override var mainUrl = "https://animedrive.me"
     override var name = "AnimeDrive"
+    override var lang = "hi"
 
+    override val hasMainPage = true
     override val supportedTypes = setOf(
         TvType.Anime,
         TvType.AnimeMovie
     )
 
-    override val hasMainPage = true
-
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Latest Anime",
+        "$mainUrl/" to "Latest",
         "$mainUrl/category/action/" to "Action",
         "$mainUrl/category/adventure/" to "Adventure",
         "$mainUrl/category/comedy/" to "Comedy",
@@ -26,56 +27,121 @@ class AnimeDriveProvider : MainAPI() {
         "$mainUrl/category/fantasy/" to "Fantasy",
         "$mainUrl/category/horror/" to "Horror",
         "$mainUrl/category/isekai/" to "Isekai",
+        "$mainUrl/category/magic/" to "Magic",
         "$mainUrl/category/mystery/" to "Mystery",
         "$mainUrl/category/romance/" to "Romance",
-        "$mainUrl/category/on-going/" to "On-Going",
-        "$mainUrl/category/hindi-dubbed-anime/" to "Hindi Dubbed"
+        "$mainUrl/category/sci-fi/" to "Sci-Fi",
+        "$mainUrl/category/sports/" to "Sports",
+        "$mainUrl/category/on-going/" to "On-Going"
     )
 
-    private fun Element.toAnimeSearchResponse(): SearchResponse? {
+    private val headers = mapOf(
+        "User-Agent" to
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Referer" to "$mainUrl/"
+    )
 
-        val href = selectFirst("a[href]")?.attr("href")
-            ?: return null
-
-        val title = selectFirst(
-            "h1, h2, h3, h4, .entry-title, .post-title"
-        )?.text()?.trim()
-            ?: selectFirst("a[href]")?.text()?.trim()
-            ?: return null
-
-        if (title.isBlank()) return null
-
-        val image = selectFirst("img")?.let {
-            it.attr("data-src")
-                .ifBlank { it.attr("data-lazy-src") }
-                .ifBlank { it.attr("src") }
-        }
-
-        return newAnimeSearchResponse(
-            title,
-            fixUrl(href),
-            TvType.Anime
-        ) {
-            posterUrl = image?.let { fixUrl(it) }
-        }
+    private fun cleanUrl(url: String): String {
+        return url
+            .replace("&amp;", "&")
+            .replace("&#038;", "&")
+            .trim()
     }
 
-    private fun parseResults(
-        document: org.jsoup.nodes.Document
-    ): List<SearchResponse> {
+    private fun getPoster(element: org.jsoup.nodes.Element): String? {
+        val image = element.selectFirst("img") ?: return null
 
-        val results = LinkedHashMap<String, SearchResponse>()
+        val url = image.attr("data-src")
+            .ifBlank { image.attr("data-lazy-src") }
+            .ifBlank { image.attr("src") }
 
-        document.select(
-            "article, .post, .post-item, .entry, .item"
-        ).forEach { element ->
+        return url
+            .takeIf { it.startsWith("http") }
+            ?.let(::cleanUrl)
+    }
 
-            element.toAnimeSearchResponse()?.let {
-                results[it.url] = it
+    private fun parsePosts(document: Document): List<SearchResponse> {
+
+        val result = LinkedHashMap<String, SearchResponse>()
+
+        /*
+         * Current site exposes posts as links/headings.
+         * We intentionally avoid inventing a single fragile CSS class.
+         */
+        document.select("article").forEach { article ->
+
+            val link = article.selectFirst("a[href]")
+                ?: return@forEach
+
+            val url = cleanUrl(
+                link.attr("abs:href")
+            )
+
+            if (!url.startsWith(mainUrl)) return@forEach
+            if (url == "$mainUrl/") return@forEach
+            if (url.contains("/category/")) return@forEach
+
+            val title = article.selectFirst(
+                "h1, h2, h3, h4, .entry-title"
+            )?.text()?.trim()
+                ?: link.text().trim()
+
+            if (title.isBlank()) return@forEach
+
+            result[url] = newAnimeSearchResponse(
+                title,
+                url,
+                TvType.Anime
+            ) {
+                posterUrl = getPoster(article)
             }
         }
 
-        return results.values.toList()
+        /*
+         * Fallback for the current homepage/theme.
+         */
+        if (result.isEmpty()) {
+            document.select("a[href]").forEach { link ->
+
+                val url = cleanUrl(
+                    link.attr("abs:href")
+                )
+
+                val title = link.text().trim()
+
+                if (
+                    !url.startsWith(mainUrl) ||
+                    url == "$mainUrl/" ||
+                    url.contains("/category/") ||
+                    title.length < 4
+                ) {
+                    return@forEach
+                }
+
+                /*
+                 * Ignore navigation/footer links.
+                 */
+                if (
+                    title.equals("Home", true) ||
+                    title.equals("Genres", true) ||
+                    title.equals("Search", true) ||
+                    title.equals("Contact Us", true) ||
+                    title.equals("About Us", true)
+                ) {
+                    return@forEach
+                }
+
+                result[url] = newAnimeSearchResponse(
+                    title,
+                    url,
+                    TvType.Anime
+                )
+            }
+        }
+
+        return result.values.toList()
     }
 
     override suspend fun getMainPage(
@@ -83,24 +149,37 @@ class AnimeDriveProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
+        val baseUrl = request.data.trimEnd('/')
+
         val url = if (page <= 1) {
-            request.data
+            baseUrl
         } else {
-            "${request.data.trimEnd('/')}/page/$page/"
+            "$baseUrl/page/$page/"
         }
 
-        val document = app.get(url).document
+        val document = try {
+            app.get(
+                url,
+                headers = headers
+            ).document
+        } catch (e: Exception) {
+            return newHomePageResponse(
+                request.name,
+                emptyList(),
+                false
+            )
+        }
 
-        val results = parseResults(document)
+        val results = parsePosts(document)
 
-        val hasNext = document.selectFirst(
-            "a.next, .next a, a[rel=next]"
+        val nextPage = document.selectFirst(
+            "a[rel=next], .next a, a.next"
         ) != null
 
         return newHomePageResponse(
             request.name,
             results,
-            hasNext
+            nextPage
         )
     }
 
@@ -108,82 +187,141 @@ class AnimeDriveProvider : MainAPI() {
         query: String
     ): List<SearchResponse> {
 
+        if (query.isBlank()) return emptyList()
+
         val encoded = URLEncoder.encode(
             query.trim(),
             "UTF-8"
         )
 
-        val document = app.get(
-            "$mainUrl/?s=$encoded"
-        ).document
+        val url = "$mainUrl/?s=$encoded"
 
-        return parseResults(document)
+        return try {
+            val document = app.get(
+                url,
+                headers = headers
+            ).document
+
+            parsePosts(document)
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
     override suspend fun load(
         url: String
     ): LoadResponse {
 
-        val document = app.get(url).document
+        val pageUrl = cleanUrl(url)
+
+        val document = try {
+            app.get(
+                pageUrl,
+                headers = headers
+            ).document
+        } catch (e: Exception) {
+
+            return newMovieLoadResponse(
+                "AnimeDrive",
+                pageUrl,
+                TvType.AnimeMovie,
+                pageUrl
+            )
+        }
 
         val title = document.selectFirst(
             "h1.entry-title, h1.post-title, h1"
         )?.text()?.trim()
-            ?: "AnimeDrive"
+            ?: document.selectFirst("meta[property=og:title]")
+                ?.attr("content")
+                ?.trim()
+            ?: document.title().substringBefore("|").trim()
 
         val poster = document.selectFirst(
-            ".entry-content img, .post-content img, article img"
-        )?.let {
-            it.attr("data-src")
-                .ifBlank { it.attr("data-lazy-src") }
-                .ifBlank { it.attr("src") }
-        }?.let { fixUrl(it) }
+            "meta[property=og:image]"
+        )?.attr("content")
+            ?.takeIf { it.startsWith("http") }
 
-        val content = document.selectFirst(
-            ".entry-content, .post-content, article"
-        )?.text()?.trim()
+            ?: document.selectFirst(
+                "article img, .entry-content img"
+            )?.let {
+                it.attr("data-src")
+                    .ifBlank { it.attr("data-lazy-src") }
+                    .ifBlank { it.attr("src") }
+            }?.takeIf { it.startsWith("http") }
 
-        val info = content ?: ""
+        val description =
+            document.selectFirst(
+                "meta[property=og:description]"
+            )?.attr("content")?.trim()
+
+                ?: document.selectFirst(
+                    ".entry-content, .post-content, article"
+                )?.text()?.trim()
+
+        val contentText =
+            document.selectFirst(
+                ".entry-content, .post-content, article"
+            )?.text()
+                ?: ""
 
         val year = Regex(
-            """(?:Year|Release Year)\s*:\s*(\d{4})"""
-        ).find(info)
+            """(?:Year|Release Year)\s*[:\-]\s*(\d{4})"""
+        )
+            .find(contentText)
             ?.groupValues
             ?.getOrNull(1)
             ?.toIntOrNull()
 
-        val genres = Regex(
-            """Genre\s*:\s*([^|]+)"""
-        ).find(info)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.split(",")
-            ?.map { it.trim() }
-            ?.filter { it.isNotBlank() }
-            ?: emptyList()
+        val genres = document.select(
+            "a[href*='/category/'], a[rel='tag']"
+        )
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(20)
 
+        /*
+         * Metadata-only episode detection.
+         *
+         * We only create an Episode when the public page
+         * actually exposes an episode-like link.
+         */
         val episodes = ArrayList<Episode>()
 
-        document.select("a[href]").forEach { element ->
+        val seen = HashSet<String>()
 
-            val href = element.attr("href")
-            val text = element.text().trim()
+        document.select("a[href]").forEach { link ->
+
+            val href = cleanUrl(
+                link.attr("abs:href")
+            )
+
+            val text = link.text().trim()
+
+            if (
+                href.isBlank() ||
+                text.isBlank() ||
+                !href.startsWith(mainUrl)
+            ) {
+                return@forEach
+            }
 
             val match = Regex(
-                """(?:episode|ep)\s*[-:#]?\s*(\d+)""",
+                """(?:episode|ep)\s*[-.#:]?\s*(\d+)""",
                 RegexOption.IGNORE_CASE
-            ).find(text) ?: return@forEach
+            ).find(text)
 
             val episodeNumber =
-                match.groupValues
-                    .getOrNull(1)
+                match?.groupValues
+                    ?.getOrNull(1)
                     ?.toIntOrNull()
                     ?: return@forEach
 
-            if (href.isBlank()) return@forEach
+            if (!seen.add(href)) return@forEach
 
             episodes.add(
-                newEpisode(fixUrl(href)) {
+                newEpisode(href) {
                     name = text
                     season = 1
                     episode = episodeNumber
@@ -192,40 +330,50 @@ class AnimeDriveProvider : MainAPI() {
             )
         }
 
-        val uniqueEpisodes = episodes
-            .distinctBy {
-                "${it.season}-${it.episode}-${it.data}"
+        val sortedEpisodes = episodes
+            .distinctBy { it.data }
+            .sortedBy { it.episode }
+
+        if (sortedEpisodes.isEmpty()) {
+
+            return newMovieLoadResponse(
+                title,
+                pageUrl,
+                TvType.AnimeMovie,
+                pageUrl
+            ) {
+                posterUrl = poster
+                backgroundPosterUrl = poster
+                plot = description
+                this.year = year
+                this.tags = genres
             }
-            .sortedWith(
-                compareBy<Episode> { it.season }
-                    .thenBy { it.episode }
-            )
+        }
 
         return newAnimeLoadResponse(
             title,
-            url,
-            if (uniqueEpisodes.isEmpty()) {
-                TvType.AnimeMovie
-            } else {
-                TvType.Anime
-            }
+            pageUrl,
+            TvType.Anime
         ) {
             posterUrl = poster
             backgroundPosterUrl = poster
-            plot = content
+            plot = description
             this.year = year
             this.tags = genres
 
-            if (uniqueEpisodes.isNotEmpty()) {
-                addEpisodes(uniqueEpisodes)
-            }
+            addEpisodes(
+                DubStatus.NotFound,
+                sortedEpisodes
+            )
         }
     }
 
     /*
      * Metadata-only provider.
      *
-     * No third-party video-host extraction is performed.
+     * AnimeDrive states that files are hosted by
+     * third-party websites. No third-party media
+     * extraction is performed here.
      */
     override suspend fun loadLinks(
         data: String,
