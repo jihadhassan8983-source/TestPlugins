@@ -2,8 +2,8 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.app
+import org.jsoup.nodes.Element
 
 class AnimeDriveProvider : MainAPI() {
     override var mainUrl = "https://animedrive.in"
@@ -18,7 +18,7 @@ class AnimeDriveProvider : MainAPI() {
         val home = document.select("article, .post-item, .item, .result-item").mapNotNull {
             it.toSearchResult()
         }
-        return newHomePageResponse(request.name, home)
+        return newHomePageResponse(name = request.name, list = home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -32,7 +32,7 @@ class AnimeDriveProvider : MainAPI() {
         
         if (title.isBlank() || href.isBlank()) return null
 
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
+        return newAnimeSearchResponse(name = title, url = href, type = TvType.Anime) {
             this.posterUrl = posterUrl
         }
     }
@@ -73,30 +73,30 @@ class AnimeDriveProvider : MainAPI() {
             }
         }
 
-        val episodes = epMap.map { (epNum, links) ->
+        val episodesList = epMap.map { (epNum, links) ->
             val dataString = links.joinToString("|||") { "${it.first}:::${it.second}" }
-            newEpisode(dataString) {
+            newEpisode(data = dataString) {
                 this.name = "Episode $epNum"
                 this.episode = epNum
             }
         }
 
-        return newAnimeLoadResponse(title, url, TvType.Anime) {
+        return newAnimeLoadResponse(name = title, url = url, type = TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
-            this.episodes = if (episodes.isEmpty()) {
+            this.episodes = if (episodesList.isEmpty()) {
                 val fallbackLinks = document.select("div.entry-content a")
                     .map { it.attr("href") to it.text() }
                     .filter { it.first.startsWith("http") && !it.first.contains(mainUrl) && !it.first.contains("telegram") }
                 
                 if (fallbackLinks.isNotEmpty()) {
                     val dataString = fallbackLinks.joinToString("|||") { "${it.first}:::${it.second}" }
-                    listOf(newEpisode(dataString) {
+                    listOf(newEpisode(data = dataString) {
                         this.name = "Movie / Batch"
                         this.episode = 1
                     })
                 } else emptyList()
-            } else episodes
+            } else episodesList
         }
     }
 
@@ -134,18 +134,19 @@ class AnimeDriveProvider : MainAPI() {
                 finalUrl.contains("pixeldrain.com") -> {
                     val id = finalUrl.substringAfter("u/").substringAfter("file/").substringBefore("?")
                     if (id.isNotBlank()) {
-                        callback(newExtractorLink(
-                            "Pixeldrain - $sourceName",
-                            "Pixeldrain",
-                            "https://pixeldrain.com/api/file/$id",
-                            "",
-                            Qualities.Unknown.value,
-                            false
-                        ))
+                        callback(
+                            ExtractorLink(
+                                source = "Pixeldrain",
+                                name = "Pixeldrain - $sourceName",
+                                url = "https://pixeldrain.com/api/file/$id",
+                                referer = "",
+                                quality = Qualities.Unknown.value
+                            )
+                        )
                     }
                 }
                 else -> {
-                    loadExtractor(finalUrl, subtitleCallback, callback)
+                    loadExtractor(url = finalUrl, subtitleCallback = subtitleCallback, callback = callback)
                 }
             }
         } catch (e: Exception) {
@@ -171,16 +172,17 @@ class AnimeDriveProvider : MainAPI() {
                 
                 if (href.startsWith("http") && !text.contains("login") && !text.contains("telegram")) {
                     if (text.contains("10gbps") || text.contains("fsl") || text.contains("download file") || text.contains("gpdl")) {
-                         callback(newExtractorLink(
-                             "HubCloud ($sourceName) - ${a.text().trim()}",
-                             "HubCloud",
-                             href,
-                             "",
-                             Qualities.Unknown.value,
-                             false
-                         ))
+                         callback(
+                             ExtractorLink(
+                                 source = "HubCloud",
+                                 name = "HubCloud ($sourceName) - ${a.text().trim()}",
+                                 url = href,
+                                 referer = "",
+                                 quality = Qualities.Unknown.value
+                             )
+                         )
                     } else if (text.contains("gofile") || text.contains("pixeldrain") || text.contains("drive")) {
-                         loadExtractor(href, subtitleCallback, callback)
+                         loadExtractor(url = href, subtitleCallback = subtitleCallback, callback = callback)
                     }
                 }
             }
