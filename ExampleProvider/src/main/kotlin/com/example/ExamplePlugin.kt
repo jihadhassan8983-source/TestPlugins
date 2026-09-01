@@ -1,14 +1,18 @@
 package com.example
 
-import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.plugins.BasePlugin
 
 @CloudstreamPlugin
-class ExamplePlugin : Plugin() {
-override fun load(context: Context) {
-registerMainAPI(AnimeThProvider())
-registerMainAPI(AnimeHDProvider())
-registerMainAPI(AnimeSaltProvider())
-}
+class ExamplePlugin : BasePlugin() {
+    override fun load() {
+        // তোমার আগের ৩টা (অপরিবর্তিত)
+        registerMainAPI(AnimeThProvider())
+        registerMainAPI(AnimeHDProvider())
+        registerMainAPI(AnimeSaltProvider())
+
+        // নতুন AnimeDrive
+        registerMainAPI(AnimeDriveProvider())
+    }
 }
