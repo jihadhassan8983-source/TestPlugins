@@ -10,7 +10,7 @@ cloudstream {
     authors = listOf("jihadhassan8983-source")
     status = 1
     tvTypes = listOf("Anime", "AnimeMovie")
-    requiresResources = true
+    requiresResources = false         // ← true থেকে false
     language = "th"
     iconUrl = "https://anime-th.com/assets/image/screen.jpg"
 }
