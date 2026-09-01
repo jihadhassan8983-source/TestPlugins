@@ -10,6 +10,7 @@ class ExamplePlugin : BasePlugin() {
         registerMainAPI(AnimeHDProvider())
         registerMainAPI(AnimeSaltProvider())
         registerMainAPI(AnimeDriveProvider())
-        registerMainAPI(AnimeKaiProvider())   // ← নতুন
+        registerMainAPI(AnimeKaiProvider())
+        registerMainAPI(AnimeLokProvider())
     }
 }
