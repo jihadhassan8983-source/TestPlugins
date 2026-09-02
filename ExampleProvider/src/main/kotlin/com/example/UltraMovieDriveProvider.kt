@@ -30,8 +30,9 @@ class UltraMovieDriveProvider : MainAPI() {
     }
 
     /**
-     * NiceHttp blocks .text when Content-Length > 5MB (OOM guard).
-     * Naruto watch pages are \~8MB — must use textLarge / document fallback.
+     * App blocks .text when Content-Length > 5MB (OOM guard).
+     * Large API exists only at runtime in the app, not in compile stubs.
+     * Try .text first, then reflection, then document.html().
      */
     private suspend fun fetchHtml(url: String): String {
         val res = app.get(url, headers = hdr())
@@ -39,7 +40,14 @@ class UltraMovieDriveProvider : MainAPI() {
             res.text
         } catch (_: Exception) {
             try {
-                res.textLarge
+                val method = res.javaClass.methods.firstOrNull { m ->
+                    m.name == "getTextLarge" || m.name == "textLarge"
+                }
+                if (method != null) {
+                    (method.invoke(res) as? String).orEmpty()
+                } else {
+                    res.document.html()
+                }
             } catch (_: Exception) {
                 try {
                     res.document.html()
@@ -50,7 +58,7 @@ class UltraMovieDriveProvider : MainAPI() {
         }
     }
 
-    // Only stable URLs (genre/language pages infinite-redirect and hang)
+    // Only stable URLs (genre/language pages cause infinite redirect hang)
     override val mainPage = mainPageOf(
         (mainUrl + "/movies/") to "All Movies",
         (mainUrl + "/") to "Home"
@@ -127,7 +135,6 @@ class UltraMovieDriveProvider : MainAPI() {
         for (k in keys) {
             var v = img.attr(k).trim()
             if (v.isBlank()) continue
-            // srcset: take first url
             if (v.contains(" ")) {
                 v = v.split(",")[0].trim().substringBefore(" ")
             }
@@ -143,7 +150,7 @@ class UltraMovieDriveProvider : MainAPI() {
         val page = if (url.contains("?")) url.substringBefore("?") else url
         val clean = page.trimEnd('/') + "/"
 
-        // 1) Small page first — title + poster (no 8MB download)
+        // Small page first — title + poster
         val infoHtml = fetchHtml(clean)
         val infoDoc = Jsoup.parse(infoHtml, mainUrl)
 
@@ -162,11 +169,13 @@ class UltraMovieDriveProvider : MainAPI() {
 
         var poster = infoDoc.selectFirst("meta[property=og:image]")?.attr("content")
         if (poster.isNullOrBlank()) {
-            poster = pickPoster(infoDoc.selectFirst("img[src*=tmdb], img[src*=image], img[src*=wp-content]"))
+            poster = pickPoster(
+                infoDoc.selectFirst("img[src*=tmdb], img[src*=image], img[src*=wp-content]")
+            )
         }
         val plot = infoDoc.selectFirst("meta[property=og:description]")?.attr("content")
 
-        // 2) Watch page for SERIES / embeds (may be huge — textLarge)
+        // Watch page for SERIES / embeds (may be large)
         val watchHtml = fetchHtml(clean + "?watch=1")
         val seriesJson = extractSeriesJson(watchHtml)
 
@@ -242,7 +251,6 @@ class UltraMovieDriveProvider : MainAPI() {
         val added = HashSet<String>()
         val embeds = LinkedHashSet<String>()
 
-        // Series: players for this episode
         val seriesJson = extractSeriesJson(html)
         if (seriesJson != null && epNum > 0) {
             val epPattern = Regex(
@@ -258,7 +266,6 @@ class UltraMovieDriveProvider : MainAPI() {
             }
         }
 
-        // Movie embeds
         Regex("https?://morencius\\.com/(?:embed|f)/[a-z0-9]+").findAll(html).forEach {
             embeds.add(it.value)
         }
@@ -272,7 +279,6 @@ class UltraMovieDriveProvider : MainAPI() {
             }
         }
 
-        // Direct m3u8 on page
         Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(html).forEach { m ->
             val u = m.value
             if (!added.add(u)) return@forEach
@@ -326,21 +332,8 @@ class UltraMovieDriveProvider : MainAPI() {
         if (code.isBlank()) return false
 
         val pageUrl = "https://morencius.com/f/" + code
-        val body = try {
-            app.get(
-                pageUrl,
-                headers = mapOf(
-                    "User-Agent" to ua,
-                    "Referer" to (mainUrl + "/")
-                )
-            ).text
-        } catch (_: Exception) {
-            try {
-                app.get(pageUrl, headers = mapOf("User-Agent" to ua, "Referer" to mainUrl)).textLarge
-            } catch (_: Exception) {
-                return false
-            }
-        }
+        val body = fetchHtml(pageUrl)
+        if (body.isBlank()) return false
 
         val unpacked = unpackEval(body)
         val searchIn = if (unpacked.isNotBlank()) unpacked else body
