@@ -187,7 +187,6 @@ class UltraMovieDriveProvider : MainAPI() {
             }
         }
 
-        // Movie: store watch html marker via data
         return newMovieLoadResponse(title, clean, TvType.Movie, clean + "|0") {
             this.posterUrl = poster
             this.plot = plot
@@ -214,81 +213,6 @@ class UltraMovieDriveProvider : MainAPI() {
         return null
     }
 
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val parts = data.split("|")
-        val page = (parts.getOrNull(0) ?: data).trimEnd('/') + "/"
-        val epNum = parts.getOrNull(1)?.toIntOrNull() ?: 0
-
-        val html = fetchHtml(page + "?watch=1")
-        if (html.isBlank()) return false
-
-        var found = false
-        val added = HashSet<String>()
-        val embeds = LinkedHashSet<String>()
-
-        // Collect every morencius / iframe host
-        Regex("https?://morencius\\.com/(?:embed|f|v|d|e)/[a-zA-Z0-9]+").findAll(html).forEach {
-            embeds.add(it.value)
-        }
-        Regex("src=[\"'](https?://morencius\\.com/[^\"']+)[\"']").findAll(html).forEach {
-            embeds.add(it.groupValues[1])
-        }
-        Regex("https?://hgcloud\\.to/(?:e/)?[a-z0-9]+").findAll(html).forEach {
-            embeds.add(it.value)
-        }
-
-        // Series episode players
-        if (epNum > 0) {
-            val seriesJson = extractSeriesJson(html)
-            if (seriesJson != null) {
-                val epPattern = Regex(
-                    "\"ep\"\\s*:\\s*" + epNum + "\\s*,[\\s\\S]*?\"players\"\\s*:\\s*\\[(.*?)]",
-                    RegexOption.DOT_MATCHES_ALL
-                )
-                val block = epPattern.find(seriesJson)?.groupValues?.getOrNull(1) ?: ""
-                Regex("https?://morencius\\.com/[a-zA-Z0-9/]+").findAll(block).forEach {
-                    embeds.add(it.value.replace("\\/", "/"))
-                }
-                Regex("src=\"(https?://[^\"]+)\"").findAll(block).forEach {
-                    embeds.add(it.groupValues[1].replace("\\/", "/"))
-                }
-            }
-        }
-
-        // Direct m3u8 already on page
-        Regex("https?://[^\\s\"'<>\\\\]+\\.m3u8[^\\s\"'<>\\\\]*").findAll(html).forEach { m ->
-            val u = m.value.replace("\\/", "/")
-            if (!added.add(u)) return@forEach
-            addLink(callback, "Direct", u, mainUrl)
-            found = true
-        }
-
-        for (embed in embeds) {
-            try {
-                if (embed.contains("morencius", true)) {
-                    if (extractMorencius(embed, callback, added)) {
-                        found = true
-                        continue
-                    }
-                }
-                try {
-                    if (loadExtractor(embed, "https://morencius.com/", subtitleCallback, callback)) {
-                        found = true
-                    }
-                } catch (_: Exception) {
-                }
-            } catch (_: Exception) {
-            }
-        }
-
-        return found
-    }
-
     private fun addLink(
         callback: (ExtractorLink) -> Unit,
         label: String,
@@ -307,6 +231,92 @@ class UltraMovieDriveProvider : MainAPI() {
         )
     }
 
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val parts = data.split("|")
+        val page = (parts.getOrNull(0) ?: data).trimEnd('/') + "/"
+        val epNum = parts.getOrNull(1)?.toIntOrNull() ?: 0
+
+        val html = fetchHtml(page + "?watch=1")
+        if (html.isBlank()) return false
+
+        var found = false
+        val added = HashSet<String>()
+        val embeds = LinkedHashSet<String>()
+
+        Regex("https?://morencius\\.com/(?:embed|f|v|d|e)/[a-zA-Z0-9]+").findAll(html).forEach {
+            embeds.add(it.value)
+        }
+        Regex("src=[\"'](https?://morencius\\.com/[^\"']+)[\"']").findAll(html).forEach {
+            embeds.add(it.groupValues[1])
+        }
+        Regex("https?://hgcloud\\.to/(?:e/)?[a-z0-9]+").findAll(html).forEach {
+            embeds.add(it.value)
+        }
+
+        if (epNum > 0) {
+            val seriesJson = extractSeriesJson(html)
+            if (seriesJson != null) {
+                val epPattern = Regex(
+                    "\"ep\"\\s*:\\s*" + epNum + "\\s*,[\\s\\S]*?\"players\"\\s*:\\s*\\[(.*?)]",
+                    RegexOption.DOT_MATCHES_ALL
+                )
+                val block = epPattern.find(seriesJson)?.groupValues?.getOrNull(1) ?: ""
+                Regex("https?://morencius\\.com/[a-zA-Z0-9/]+").findAll(block).forEach {
+                    embeds.add(it.value.replace("\\/", "/"))
+                }
+                Regex("src=\"(https?://[^\"]+)\"").findAll(block).forEach {
+                    embeds.add(it.groupValues[1].replace("\\/", "/"))
+                }
+            }
+        }
+
+        Regex("https?://[^\\s\"'<>\\\\]+\\.m3u8[^\\s\"'<>\\\\]*").findAll(html).forEach { m ->
+            val u = m.value.replace("\\/", "/")
+            if (!added.add(u)) return@forEach
+            addLink(callback, "Direct", u, mainUrl)
+            found = true
+        }
+
+        // Collect morencius codes — try reversed (full movie often last)
+        val morenciusCodes = LinkedHashSet<String>()
+        for (embed in embeds) {
+            if (embed.contains("morencius", true)) {
+                val code = embed.substringAfterLast("/").substringBefore("?").trim()
+                if (code.isNotBlank()) morenciusCodes.add(code)
+            }
+        }
+
+        for (code in morenciusCodes.reversed()) {
+            try {
+                if (extractMorencius("https://morencius.com/f/$code", callback, added)) {
+                    found = true
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        for (embed in embeds) {
+            if (embed.contains("morencius", true)) continue
+            try {
+                if (loadExtractor(embed, mainUrl, subtitleCallback, callback)) {
+                    found = true
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        return found
+    }
+
+    /**
+     * Skip ad/preview clips (duration < 2 minutes).
+     * Full movie embeds are usually 1+ hours.
+     */
     private suspend fun extractMorencius(
         embed: String,
         callback: (ExtractorLink) -> Unit,
@@ -315,11 +325,9 @@ class UltraMovieDriveProvider : MainAPI() {
         val code = embed.substringAfterLast("/").substringBefore("?").trim()
         if (code.isBlank()) return false
 
-        // Try both /f/ and /embed/
         val pages = listOf(
             "https://morencius.com/f/$code",
-            "https://morencius.com/embed/$code",
-            "https://morencius.com/v/$code"
+            "https://morencius.com/embed/$code"
         )
 
         var ok = false
@@ -327,58 +335,49 @@ class UltraMovieDriveProvider : MainAPI() {
             val body = fetchHtml(pageUrl)
             if (body.isBlank()) continue
 
-            // 1) Unpack Dean Edwards packer (FIXED regex — was broken before)
             val unpacked = unpackEval(body)
-            val searchIn = if (unpacked.isNotBlank()) unpacked + "\n" + body else body
+            val searchIn = if (unpacked.isNotBlank()) unpacked else body
 
-            // 2) hls2 field
+            var durationSec = 0.0
+            Regex("""duration\s*:\s*["']?([0-9.]+)""").find(searchIn)?.groupValues?.getOrNull(1)
+                ?.toDoubleOrNull()?.let { durationSec = it }
+
+            // Skip ads / trailers / samples under 2 minutes
+            if (durationSec > 0.0 && durationSec < 120.0) {
+                continue
+            }
+
             Regex("\"hls2\"\\s*:\\s*\"(https?://[^\"]+)\"").findAll(searchIn).forEach { m ->
                 val u = m.groupValues[1].replace("\\/", "/")
                 if (!added.add(u)) return@forEach
-                addLink(callback, "Morencius", u, "https://morencius.com/")
+                val label = if (durationSec >= 120.0) {
+                    "Morencius " + (durationSec / 60).toInt() + "min"
+                } else {
+                    "Morencius"
+                }
+                addLink(callback, label, u, "https://morencius.com/")
                 ok = true
             }
 
-            // 3) any m3u8
             Regex("https?://[^\\s\"'\\\\]+\\.m3u8[^\\s\"'\\\\]*").findAll(searchIn).forEach { m ->
                 val u = m.value.replace("\\/", "/")
                 if (!added.add(u)) return@forEach
-                addLink(callback, "Morencius HLS", u, "https://morencius.com/")
-                ok = true
-            }
-
-            // 4) file: "..."
-            Regex("file\\s*:\\s*\"(https?://[^\"]+)\"").findAll(searchIn).forEach { m ->
-                val u = m.groupValues[1].replace("\\/", "/")
-                if (!added.add(u)) return@forEach
-                addLink(callback, "Morencius File", u, "https://morencius.com/")
+                if (durationSec > 0.0 && durationSec < 120.0) return@forEach
+                val label = if (durationSec >= 120.0) {
+                    "Morencius " + (durationSec / 60).toInt() + "min"
+                } else {
+                    "Morencius HLS"
+                }
+                addLink(callback, label, u, "https://morencius.com/")
                 ok = true
             }
 
             if (ok) break
         }
-
-        // 5) CloudStream built-in extractor
-        if (!ok) {
-            try {
-                if (loadExtractor(
-                        "https://morencius.com/embed/$code",
-                        "https://morencius.com/",
-                        { },
-                        callback
-                    )
-                ) {
-                    ok = true
-                }
-            } catch (_: Exception) {
-            }
-        }
         return ok
     }
 
-    /** FIXED: packer ends with .split('|') not .split('\|') */
     private fun unpackEval(html: String): String {
-        // Match: eval(function(p,a,c,k,e,d)...}('payload',radix,count,'k|e|y|s'.split('|')
         val re = Regex(
             """eval\(function\(p,a,c,k,e,d\)\{.*?return p\}\('((?:\\'|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\'|[^'])*)'\.split\('\|'\)""",
             RegexOption.DOT_MATCHES_ALL
