@@ -8,12 +8,13 @@ buildscript {
         google()
         mavenCentral()
         maven("https://jitpack.io")
+        mavenLocal()
     }
 
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
-        // Use master-SNAPSHOT (commit pin 32895aedb6 returns 404 on JitPack)
-        classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
+        // Resolved via includeBuild(../cs-gradle) in CI — not from broken JitPack POM
+        classpath("com.github.recloudstream:gradle:1.0.0")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
 }
