@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://anime-th.com/assets/image/screen.jpg",
-        "fileHash": "sha256-06b95851f12fcd7999f63200d80eebe21c107296238de6ed1dc116449573c89f",
+        "fileHash": "sha256-3a8ca734ef89c39ba2c7672ca89209c728065424fe00a4ca4cea3abcf54c7dee",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/jihadhassan8983-source/TestPlugins",
-        "fileSize": 89263,
+        "fileSize": 100613,
         "status": 1,
         "language": "th",
         "authors": [
