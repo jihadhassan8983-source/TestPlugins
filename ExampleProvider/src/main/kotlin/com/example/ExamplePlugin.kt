@@ -12,5 +12,6 @@ class ExamplePlugin : BasePlugin() {
         registerMainAPI(AnimeDriveProvider())
         registerMainAPI(AnimeKaiProvider())
         registerMainAPI(AnimeLokProvider())
+        registerMainAPI(UltraMovieDriveProvider())
     }
 }
