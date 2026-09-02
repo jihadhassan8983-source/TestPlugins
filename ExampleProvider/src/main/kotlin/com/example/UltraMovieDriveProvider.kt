@@ -15,12 +15,7 @@ class UltraMovieDriveProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(
-        TvType.Movie,
-        TvType.TvSeries,
-        TvType.Anime,
-        TvType.AnimeMovie
-    )
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     private val ua =
         "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
@@ -33,7 +28,7 @@ class UltraMovieDriveProvider : MainAPI() {
         )
     }
 
-    // Only working URLs (others cause infinite redirect hang)
+    // Only stable pages (genre/language URLs infinite-redirect and hang the app)
     override val mainPage = mainPageOf(
         (mainUrl + "/") to "Home",
         (mainUrl + "/movies/") to "All Movies"
@@ -95,23 +90,12 @@ class UltraMovieDriveProvider : MainAPI() {
                 if (poster.isNullOrBlank()) poster = img.attr("data-src")
             }
 
-            val isSeries = title.contains("Season", true) ||
-                    title.contains("Series", true) ||
-                    slug.contains("season")
-
-            if (isSeries) {
-                out.add(
-                    newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                        this.posterUrl = poster
-                    }
-                )
-            } else {
-                out.add(
-                    newMovieSearchResponse(title, href, TvType.Movie) {
-                        this.posterUrl = poster
-                    }
-                )
-            }
+            // Use Movie search response only (max stub compatibility)
+            out.add(
+                newMovieSearchResponse(title, href, TvType.Movie) {
+                    this.posterUrl = poster
+                }
+            )
         }
         return out.distinctBy { it.url }
     }
@@ -141,7 +125,6 @@ class UltraMovieDriveProvider : MainAPI() {
         if (poster.isNullOrBlank()) {
             poster = doc.selectFirst("img[src*=tmdb], img[src*=image]")?.attr("src")
         }
-
         val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
 
         val seriesJson = extractSeriesJson(html)
@@ -164,7 +147,6 @@ class UltraMovieDriveProvider : MainAPI() {
                     }
                 )
             }
-
             if (episodes.isNotEmpty()) {
                 val sorted = episodes.sortedWith(compareBy(nullsLast()) { it.episode })
                 return newTvSeriesLoadResponse(title, clean, TvType.TvSeries, sorted) {
@@ -193,9 +175,7 @@ class UltraMovieDriveProvider : MainAPI() {
             if (c == '{') depth++
             else if (c == '}') {
                 depth--
-                if (depth == 0) {
-                    return html.substring(start, i + 1)
-                }
+                if (depth == 0) return html.substring(start, i + 1)
             }
             i++
         }
@@ -223,6 +203,7 @@ class UltraMovieDriveProvider : MainAPI() {
         val added = HashSet<String>()
         val embeds = LinkedHashSet<String>()
 
+        // Series episode players
         val seriesJson = extractSeriesJson(html)
         if (seriesJson != null && epNum > 0) {
             val epPattern = Regex(
@@ -230,20 +211,18 @@ class UltraMovieDriveProvider : MainAPI() {
                 RegexOption.DOT_MATCHES_ALL
             )
             val block = epPattern.find(seriesJson)?.groupValues?.getOrNull(1) ?: ""
-            Regex("src\\\\?\"\\s*:\\s*\\\\?\"(https?://[^\\\\\"]+)").findAll(block).forEach { m ->
-                embeds.add(m.groupValues[1].replace("\\/", "/"))
-            }
             Regex("src=\"(https?://[^\"]+)\"").findAll(block).forEach { m ->
                 embeds.add(m.groupValues[1].replace("\\/", "/"))
-            }
-            Regex("https?://ultramoviedrive\\.rpmvip\\.com/#[a-zA-Z0-9]+").findAll(block).forEach {
-                embeds.add(it.value)
             }
             Regex("https?://morencius\\.com/(?:embed|f)/[a-z0-9]+").findAll(block).forEach {
                 embeds.add(it.value)
             }
+            Regex("https?://ultramoviedrive\\.rpmvip\\.com/#[a-zA-Z0-9]+").findAll(block).forEach {
+                embeds.add(it.value)
+            }
         }
 
+        // Movie embeds on watch page
         Regex("https?://morencius\\.com/(?:embed|f)/[a-z0-9]+").findAll(html).forEach {
             embeds.add(it.value)
         }
@@ -252,11 +231,12 @@ class UltraMovieDriveProvider : MainAPI() {
         }
         Regex("<iframe[^>]+src=\"(https?://[^\"]+)\"").findAll(html).forEach { m ->
             val u = m.groupValues[1]
-            if (!u.contains("googletag") && !u.contains("ultramoviedrive.com")) {
+            if (!u.contains("googletag") && !u.contains("ultramoviedrive.com/")) {
                 embeds.add(u)
             }
         }
 
+        // Direct HLS on page
         Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(html).forEach { m ->
             val u = m.value
             if (!added.add(u)) return@forEach
@@ -283,14 +263,17 @@ class UltraMovieDriveProvider : MainAPI() {
                 } catch (_: Exception) {
                 }
 
-                val body = app.get(embed, headers = hdr(mainUrl)).text
-                Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(body).forEach { m ->
-                    val u = m.value
-                    if (!added.add(u)) return@forEach
-                    callback.invoke(
-                        ExtractorLink(name, "Server", u, embed, Qualities.Unknown.value, true)
-                    )
-                    found = true
+                // last resort: open embed page
+                if (!embed.contains("rpmvip", true)) {
+                    val body = app.get(embed, headers = hdr(mainUrl)).text
+                    Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(body).forEach { m ->
+                        val u = m.value
+                        if (!added.add(u)) return@forEach
+                        callback.invoke(
+                            ExtractorLink(name, "Server", u, embed, Qualities.Unknown.value, true)
+                        )
+                        found = true
+                    }
                 }
             } catch (_: Exception) {
             }
@@ -307,6 +290,7 @@ class UltraMovieDriveProvider : MainAPI() {
         val code = embed.substringAfterLast("/").substringBefore("?").trim()
         if (code.isBlank()) return false
 
+        // Prefer /f/ page (has packed player sources)
         val pageUrl = "https://morencius.com/f/" + code
         val body = app.get(
             pageUrl,
@@ -320,8 +304,9 @@ class UltraMovieDriveProvider : MainAPI() {
         val searchIn = if (unpacked.isNotBlank()) unpacked else body
 
         var ok = false
-        Regex("https?://[^\\s\"'\\\\]+\\.m3u8[^\\s\"'\\\\]*").findAll(searchIn).forEach { m ->
-            val u = m.value.replace("\\/", "/")
+
+        Regex("\"hls2\"\\s*:\\s*\"(https?://[^\"]+)\"").findAll(searchIn).forEach { m ->
+            val u = m.groupValues[1].replace("\\/", "/")
             if (!added.add(u)) return@forEach
             callback.invoke(
                 ExtractorLink(
@@ -336,8 +321,8 @@ class UltraMovieDriveProvider : MainAPI() {
             ok = true
         }
 
-        Regex("\"hls2\"\\s*:\\s*\"(https?://[^\"]+)\"").findAll(searchIn).forEach { m ->
-            val u = m.groupValues[1].replace("\\/", "/")
+        Regex("https?://[^\\s\"'\\\\]+\\.m3u8[^\\s\"'\\\\]*").findAll(searchIn).forEach { m ->
+            val u = m.value.replace("\\/", "/")
             if (!added.add(u)) return@forEach
             callback.invoke(
                 ExtractorLink(
@@ -352,9 +337,26 @@ class UltraMovieDriveProvider : MainAPI() {
             ok = true
         }
 
+        // Also try CloudStream built-in extractor on embed URL
+        if (!ok) {
+            try {
+                if (loadExtractor(
+                        "https://morencius.com/embed/" + code,
+                        mainUrl,
+                        { },
+                        callback
+                    )
+                ) {
+                    ok = true
+                }
+            } catch (_: Exception) {
+            }
+        }
+
         return ok
     }
 
+    /** Dean Edwards packer unpack (VidHide / Morencius) */
     private fun unpackEval(html: String): String {
         val re = Regex(
             "eval\\(function\\(p,a,c,k,e,d\\)\\{.*?return p\\}\\('(.*?)'\\s*,\\s*([0-9]+)\\s*,\\s*([0-9]+)\\s*,\\s*'(.*?)'\\.split\\('\\\\|'\\)",
@@ -362,12 +364,10 @@ class UltraMovieDriveProvider : MainAPI() {
         )
         val m = re.find(html) ?: return ""
         return try {
-            val payload = m.groupValues[1]
+            var p = m.groupValues[1]
             val radix = m.groupValues[2].toInt()
-            val count = m.groupValues[3].toInt()
+            var c = m.groupValues[3].toInt()
             val keywords = m.groupValues[4].split("|")
-            var p = payload
-            var c = count
             while (c > 0) {
                 c--
                 if (c < keywords.size && keywords[c].isNotEmpty()) {
