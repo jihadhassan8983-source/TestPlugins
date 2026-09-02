@@ -23,17 +23,11 @@ class UltraMovieDriveProvider : MainAPI() {
     private fun hdr(ref: String = mainUrl + "/"): Map<String, String> {
         return mapOf(
             "User-Agent" to ua,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.9",
+            "Accept" to "*/*",
             "Referer" to ref
         )
     }
 
-    /**
-     * App blocks .text when Content-Length > 5MB (OOM guard).
-     * Large API exists only at runtime in the app, not in compile stubs.
-     * Try .text first, then reflection, then document.html().
-     */
     private suspend fun fetchHtml(url: String): String {
         val res = app.get(url, headers = hdr())
         return try {
@@ -58,9 +52,10 @@ class UltraMovieDriveProvider : MainAPI() {
         }
     }
 
-    // Only stable URLs (genre/language pages cause infinite redirect hang)
+    // Genre URLs on this site infinite-redirect. Only these work.
     override val mainPage = mainPageOf(
         (mainUrl + "/movies/") to "All Movies",
+        (mainUrl + "/movies/page/2/") to "More Movies",
         (mainUrl + "/") to "Home"
     )
 
@@ -81,7 +76,7 @@ class UltraMovieDriveProvider : MainAPI() {
         return try {
             val q = URLEncoder.encode(query, "UTF-8")
             val html = fetchHtml(mainUrl + "/?s=" + q)
-            parseCards(html).take(30)
+            parseCards(html).take(40)
         } catch (_: Exception) {
             emptyList()
         }
@@ -103,13 +98,11 @@ class UltraMovieDriveProvider : MainAPI() {
             if (!seen.add(href)) continue
 
             val slug = href.trimEnd('/').substringAfterLast('/')
-            if (slug.isBlank() || slug == "movies") continue
+            if (slug.isBlank() || slug == "movies" || slug.startsWith("page")) continue
 
             var title = ""
             val img = a.selectFirst("img")
-            if (img != null) {
-                title = img.attr("alt").trim()
-            }
+            if (img != null) title = img.attr("alt").trim()
             if (title.isBlank()) title = a.attr("title").trim()
             if (title.isBlank()) title = a.text().trim()
             if (title.isBlank()) title = slug.replace("-", " ")
@@ -128,29 +121,21 @@ class UltraMovieDriveProvider : MainAPI() {
 
     private fun pickPoster(img: org.jsoup.nodes.Element?): String? {
         if (img == null) return null
-        val keys = listOf(
-            "data-src", "data-lazy-src", "data-original",
-            "data-srcset", "srcset", "src"
-        )
-        for (k in keys) {
+        for (k in listOf("data-src", "data-lazy-src", "data-original", "src")) {
             var v = img.attr(k).trim()
             if (v.isBlank()) continue
-            if (v.contains(" ")) {
-                v = v.split(",")[0].trim().substringBefore(" ")
-            }
             if (v.startsWith("//")) v = "https:$v"
             if (v.startsWith("http")) return v
             if (v.startsWith("/")) return mainUrl + v
         }
         val abs = img.attr("abs:src")
-        return if (abs.isNotBlank()) abs else null
+        return abs.ifBlank { null }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val page = if (url.contains("?")) url.substringBefore("?") else url
         val clean = page.trimEnd('/') + "/"
 
-        // Small page first — title + poster
         val infoHtml = fetchHtml(clean)
         val infoDoc = Jsoup.parse(infoHtml, mainUrl)
 
@@ -169,17 +154,14 @@ class UltraMovieDriveProvider : MainAPI() {
 
         var poster = infoDoc.selectFirst("meta[property=og:image]")?.attr("content")
         if (poster.isNullOrBlank()) {
-            poster = pickPoster(
-                infoDoc.selectFirst("img[src*=tmdb], img[src*=image], img[src*=wp-content]")
-            )
+            poster = pickPoster(infoDoc.selectFirst("img[src*=tmdb], img[src*=wp-content], img"))
         }
         val plot = infoDoc.selectFirst("meta[property=og:description]")?.attr("content")
 
-        // Watch page for SERIES / embeds (may be large)
         val watchHtml = fetchHtml(clean + "?watch=1")
         val seriesJson = extractSeriesJson(watchHtml)
 
-        if (seriesJson != null) {
+        if (!seriesJson.isNullOrBlank()) {
             val episodes = ArrayList<Episode>()
             val epRe = Regex(
                 "\\{\"ep\"\\s*:\\s*([0-9]+)\\s*,\\s*\"title\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\""
@@ -188,9 +170,7 @@ class UltraMovieDriveProvider : MainAPI() {
             for (m in epRe.findAll(seriesJson)) {
                 val num = m.groupValues[1].toIntOrNull() ?: continue
                 if (!seen.add(num)) continue
-                val epTitle = m.groupValues[2]
-                    .replace("\\\"", "\"")
-                    .replace("\\/", "/")
+                val epTitle = m.groupValues[2].replace("\\\"", "\"").replace("\\/", "/")
                 episodes.add(
                     newEpisode(clean + "|" + num) {
                         this.name = if (epTitle.isNotBlank()) epTitle else ("Episode " + num)
@@ -207,6 +187,7 @@ class UltraMovieDriveProvider : MainAPI() {
             }
         }
 
+        // Movie: store watch html marker via data
         return newMovieLoadResponse(title, clean, TvType.Movie, clean + "|0") {
             this.posterUrl = poster
             this.plot = plot
@@ -223,9 +204,8 @@ class UltraMovieDriveProvider : MainAPI() {
         var depth = 0
         var i = start
         while (i < html.length) {
-            val c = html[i]
-            if (c == '{') depth++
-            else if (c == '}') {
+            if (html[i] == '{') depth++
+            else if (html[i] == '}') {
                 depth--
                 if (depth == 0) return html.substring(start, i + 1)
             }
@@ -251,76 +231,80 @@ class UltraMovieDriveProvider : MainAPI() {
         val added = HashSet<String>()
         val embeds = LinkedHashSet<String>()
 
-        val seriesJson = extractSeriesJson(html)
-        if (seriesJson != null && epNum > 0) {
-            val epPattern = Regex(
-                "\"ep\"\\s*:\\s*" + epNum + "\\s*,[\\s\\S]*?\"players\"\\s*:\\s*\\[(.*?)]",
-                RegexOption.DOT_MATCHES_ALL
-            )
-            val block = epPattern.find(seriesJson)?.groupValues?.getOrNull(1) ?: ""
-            Regex("src=\"(https?://[^\"]+)\"").findAll(block).forEach { m ->
-                embeds.add(m.groupValues[1].replace("\\/", "/"))
-            }
-            Regex("https?://morencius\\.com/(?:embed|f)/[a-z0-9]+").findAll(block).forEach {
-                embeds.add(it.value)
-            }
-        }
-
-        Regex("https?://morencius\\.com/(?:embed|f)/[a-z0-9]+").findAll(html).forEach {
+        // Collect every morencius / iframe host
+        Regex("https?://morencius\\.com/(?:embed|f|v|d|e)/[a-zA-Z0-9]+").findAll(html).forEach {
             embeds.add(it.value)
+        }
+        Regex("src=[\"'](https?://morencius\\.com/[^\"']+)[\"']").findAll(html).forEach {
+            embeds.add(it.groupValues[1])
         }
         Regex("https?://hgcloud\\.to/(?:e/)?[a-z0-9]+").findAll(html).forEach {
             embeds.add(it.value)
         }
-        Regex("<iframe[^>]+src=\"(https?://[^\"]+)\"").findAll(html).forEach { m ->
-            val u = m.groupValues[1]
-            if (!u.contains("googletag") && !u.contains("ultramoviedrive.com/")) {
-                embeds.add(u)
+
+        // Series episode players
+        if (epNum > 0) {
+            val seriesJson = extractSeriesJson(html)
+            if (seriesJson != null) {
+                val epPattern = Regex(
+                    "\"ep\"\\s*:\\s*" + epNum + "\\s*,[\\s\\S]*?\"players\"\\s*:\\s*\\[(.*?)]",
+                    RegexOption.DOT_MATCHES_ALL
+                )
+                val block = epPattern.find(seriesJson)?.groupValues?.getOrNull(1) ?: ""
+                Regex("https?://morencius\\.com/[a-zA-Z0-9/]+").findAll(block).forEach {
+                    embeds.add(it.value.replace("\\/", "/"))
+                }
+                Regex("src=\"(https?://[^\"]+)\"").findAll(block).forEach {
+                    embeds.add(it.groupValues[1].replace("\\/", "/"))
+                }
             }
         }
 
-        Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(html).forEach { m ->
-            val u = m.value
+        // Direct m3u8 already on page
+        Regex("https?://[^\\s\"'<>\\\\]+\\.m3u8[^\\s\"'<>\\\\]*").findAll(html).forEach { m ->
+            val u = m.value.replace("\\/", "/")
             if (!added.add(u)) return@forEach
-            callback.invoke(
-                ExtractorLink(name, "Direct HLS", u, mainUrl, Qualities.Unknown.value, true)
-            )
+            addLink(callback, "Direct", u, mainUrl)
             found = true
         }
 
         for (embed in embeds) {
             try {
-                if (embed.contains("morencius.com", true)) {
+                if (embed.contains("morencius", true)) {
                     if (extractMorencius(embed, callback, added)) {
                         found = true
                         continue
                     }
                 }
-
                 try {
-                    if (loadExtractor(embed, mainUrl, subtitleCallback, callback)) {
+                    if (loadExtractor(embed, "https://morencius.com/", subtitleCallback, callback)) {
                         found = true
-                        continue
                     }
                 } catch (_: Exception) {
-                }
-
-                if (!embed.contains("rpmvip", true) && !embed.contains("#")) {
-                    val body = fetchHtml(embed)
-                    Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(body).forEach { m ->
-                        val u = m.value
-                        if (!added.add(u)) return@forEach
-                        callback.invoke(
-                            ExtractorLink(name, "Server", u, embed, Qualities.Unknown.value, true)
-                        )
-                        found = true
-                    }
                 }
             } catch (_: Exception) {
             }
         }
 
         return found
+    }
+
+    private fun addLink(
+        callback: (ExtractorLink) -> Unit,
+        label: String,
+        url: String,
+        referer: String
+    ) {
+        callback.invoke(
+            ExtractorLink(
+                name,
+                label,
+                url,
+                referer,
+                Qualities.Unknown.value,
+                url.contains(".m3u8")
+            )
+        )
     }
 
     private suspend fun extractMorencius(
@@ -331,49 +315,59 @@ class UltraMovieDriveProvider : MainAPI() {
         val code = embed.substringAfterLast("/").substringBefore("?").trim()
         if (code.isBlank()) return false
 
-        val pageUrl = "https://morencius.com/f/" + code
-        val body = fetchHtml(pageUrl)
-        if (body.isBlank()) return false
+        // Try both /f/ and /embed/
+        val pages = listOf(
+            "https://morencius.com/f/$code",
+            "https://morencius.com/embed/$code",
+            "https://morencius.com/v/$code"
+        )
 
-        val unpacked = unpackEval(body)
-        val searchIn = if (unpacked.isNotBlank()) unpacked else body
         var ok = false
+        for (pageUrl in pages) {
+            val body = fetchHtml(pageUrl)
+            if (body.isBlank()) continue
 
-        Regex("\"hls2\"\\s*:\\s*\"(https?://[^\"]+)\"").findAll(searchIn).forEach { m ->
-            val u = m.groupValues[1].replace("\\/", "/")
-            if (!added.add(u)) return@forEach
-            callback.invoke(
-                ExtractorLink(
-                    name,
-                    "Morencius",
-                    u,
-                    "https://morencius.com/",
-                    Qualities.Unknown.value,
-                    true
-                )
-            )
-            ok = true
+            // 1) Unpack Dean Edwards packer (FIXED regex — was broken before)
+            val unpacked = unpackEval(body)
+            val searchIn = if (unpacked.isNotBlank()) unpacked + "\n" + body else body
+
+            // 2) hls2 field
+            Regex("\"hls2\"\\s*:\\s*\"(https?://[^\"]+)\"").findAll(searchIn).forEach { m ->
+                val u = m.groupValues[1].replace("\\/", "/")
+                if (!added.add(u)) return@forEach
+                addLink(callback, "Morencius", u, "https://morencius.com/")
+                ok = true
+            }
+
+            // 3) any m3u8
+            Regex("https?://[^\\s\"'\\\\]+\\.m3u8[^\\s\"'\\\\]*").findAll(searchIn).forEach { m ->
+                val u = m.value.replace("\\/", "/")
+                if (!added.add(u)) return@forEach
+                addLink(callback, "Morencius HLS", u, "https://morencius.com/")
+                ok = true
+            }
+
+            // 4) file: "..."
+            Regex("file\\s*:\\s*\"(https?://[^\"]+)\"").findAll(searchIn).forEach { m ->
+                val u = m.groupValues[1].replace("\\/", "/")
+                if (!added.add(u)) return@forEach
+                addLink(callback, "Morencius File", u, "https://morencius.com/")
+                ok = true
+            }
+
+            if (ok) break
         }
 
-        Regex("https?://[^\\s\"'\\\\]+\\.m3u8[^\\s\"'\\\\]*").findAll(searchIn).forEach { m ->
-            val u = m.value.replace("\\/", "/")
-            if (!added.add(u)) return@forEach
-            callback.invoke(
-                ExtractorLink(
-                    name,
-                    "Morencius HLS",
-                    u,
-                    "https://morencius.com/",
-                    Qualities.Unknown.value,
-                    true
-                )
-            )
-            ok = true
-        }
-
+        // 5) CloudStream built-in extractor
         if (!ok) {
             try {
-                if (loadExtractor("https://morencius.com/embed/" + code, mainUrl, { }, callback)) {
+                if (loadExtractor(
+                        "https://morencius.com/embed/$code",
+                        "https://morencius.com/",
+                        { },
+                        callback
+                    )
+                ) {
                     ok = true
                 }
             } catch (_: Exception) {
@@ -382,14 +376,18 @@ class UltraMovieDriveProvider : MainAPI() {
         return ok
     }
 
+    /** FIXED: packer ends with .split('|') not .split('\|') */
     private fun unpackEval(html: String): String {
+        // Match: eval(function(p,a,c,k,e,d)...}('payload',radix,count,'k|e|y|s'.split('|')
         val re = Regex(
-            "eval\\(function\\(p,a,c,k,e,d\\)\\{.*?return p\\}\\('(.*?)'\\s*,\\s*([0-9]+)\\s*,\\s*([0-9]+)\\s*,\\s*'(.*?)'\\.split\\('\\\\|'\\)",
+            """eval\(function\(p,a,c,k,e,d\)\{.*?return p\}\('((?:\\'|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\'|[^'])*)'\.split\('\|'\)""",
             RegexOption.DOT_MATCHES_ALL
         )
         val m = re.find(html) ?: return ""
         return try {
             var p = m.groupValues[1]
+                .replace("\\'", "'")
+                .replace("\\n", "\n")
             val radix = m.groupValues[2].toInt()
             var c = m.groupValues[3].toInt()
             val keywords = m.groupValues[4].split("|")
