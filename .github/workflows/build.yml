@@ -25,6 +25,12 @@ jobs:
         with:
           path: "src"
 
+      - name: Checkout Cloudstream Gradle Plugin
+        uses: actions/checkout@v4
+        with:
+          repository: recloudstream/gradle
+          path: "cs-gradle"
+
       - name: Checkout builds
         uses: actions/checkout@v4
         with:
