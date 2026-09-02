@@ -3,16 +3,16 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 }
 
-version = 3
+version = 4
 
 cloudstream {
-    description = "Egoistrepo - AnimeTH Thai sub and dub"
+    description = "Multi anime + UltraMovieDrive providers"
     authors = listOf("jihadhassan8983-source")
     status = 1
-    tvTypes = listOf("Anime", "AnimeMovie")
-    requiresResources = false         // ← true থেকে false
-    language = "th"
-    iconUrl = "https://anime-th.com/assets/image/screen.jpg"
+    tvTypes = listOf("Anime", "AnimeMovie", "Movie", "TvSeries")
+    requiresResources = false
+    language = "hi"
+    iconUrl = "https://ultramoviedrive.com/favicon.ico"
 }
 
 android {
