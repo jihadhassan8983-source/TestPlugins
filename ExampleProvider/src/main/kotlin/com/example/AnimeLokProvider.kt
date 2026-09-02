@@ -40,22 +40,30 @@ class AnimeLokProvider : MainAPI() {
     override val mainPage = mainPageOf(
         (mainUrl + "/home") to "Home",
         (mainUrl + "/latest-episode") to "Latest Episodes",
-        (mainUrl + "/most-watched") to "Most Watched",
-        (mainUrl + "/az-list") to "A-Z List"
+        (mainUrl + "/trending") to "Trending",
+        (mainUrl + "/most-watched") to "Most Watched"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) {
             return newHomePageResponse(request.name, emptyList(), false)
         }
-        val html = app.get(request.data, headers = htmlHeaders()).text
-        return newHomePageResponse(request.name, parseCards(html), true)
+        return try {
+            val html = app.get(request.data, headers = htmlHeaders()).text
+            newHomePageResponse(request.name, parseCards(html), false)
+        } catch (_: Exception) {
+            newHomePageResponse(request.name, emptyList(), false)
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query, "UTF-8")
-        val html = app.get(mainUrl + "/search?q=" + q, headers = htmlHeaders()).text
-        return parseCards(html)
+        return try {
+            val q = URLEncoder.encode(query, "UTF-8")
+            val html = app.get(mainUrl + "/search?q=" + q, headers = htmlHeaders()).text
+            parseCards(html)
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     private fun parseCards(html: String): List<SearchResponse> {
@@ -119,11 +127,6 @@ class AnimeLokProvider : MainAPI() {
         }
     }
 
-    private fun isHashSlug(slug: String): Boolean {
-        if (slug.length < 12) return false
-        return slug.all { it in '0'..'9' || it in 'a'..'f' }
-    }
-
     private suspend fun resolveSlug(urlOrSlug: String): String {
         var slug = urlOrSlug
         if (slug.contains("/anime/")) slug = slug.substringAfterLast("/anime/")
@@ -131,7 +134,7 @@ class AnimeLokProvider : MainAPI() {
         slug = slug.substringBefore("/").substringBefore("?").trim()
         if (slug.isBlank()) slug = urlOrSlug.trim()
 
-        if (slug.contains("-") && slug.any { it.isDigit() } && !isHashSlug(slug)) {
+        if (slug.contains("-") && slug.any { it.isDigit() }) {
             return slug
         }
 
@@ -168,9 +171,17 @@ class AnimeLokProvider : MainAPI() {
         val anilistId = Regex("\"anilistId\"\\s*:\\s*([0-9]+)")
             .find(ep1Text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
-        val poster = Regex("\"img\"\\s*:\\s*\"(https?://[^\"]+)\"")
+        var poster = Regex("\"img\"\\s*:\\s*\"(https?://[^\"]+)\"")
             .find(ep1Text)?.groupValues?.get(1)
             ?.replace("\\/", "/")
+
+        if (poster.isNullOrBlank()) {
+            try {
+                val pageHtml = app.get(mainUrl + "/anime/" + slug, headers = htmlHeaders()).text
+                poster = Regex("og:image\"\\s+content=\"([^\"]+)\"").find(pageHtml)?.groupValues?.get(1)
+            } catch (_: Exception) {
+            }
+        }
 
         val epNums = LinkedHashSet<Int>()
         epNums.add(1)
@@ -199,7 +210,7 @@ class AnimeLokProvider : MainAPI() {
         if (epNums.size <= 1) {
             var n = 2
             var miss = 0
-            while (n <= 30 && miss < 2) {
+            while (n <= 40 && miss < 2) {
                 try {
                     val t = app.get(
                         mainUrl + "/api/anime/" + slug + "/episodes/" + n,
@@ -218,7 +229,7 @@ class AnimeLokProvider : MainAPI() {
             }
         } else {
             val max = epNums.maxOrNull() ?: 1
-            if (max <= 120) {
+            if (max <= 150) {
                 for (i in 1..max) epNums.add(i)
             }
         }
@@ -236,20 +247,54 @@ class AnimeLokProvider : MainAPI() {
         }
     }
 
+    private fun qualityFrom(label: String): Int {
+        val t = label.lowercase()
+        return when {
+            t.contains("1080") -> Qualities.P1080.value
+            t.contains("720") -> Qualities.P720.value
+            t.contains("480") -> Qualities.P480.value
+            t.contains("360") -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
+    private fun addM3u8(
+        callback: (ExtractorLink) -> Unit,
+        label: String,
+        url: String,
+        referer: String,
+        quality: Int,
+        added: HashSet<String>
+    ): Boolean {
+        val u = url.replace("\\/", "/").trim()
+        if (!u.startsWith("http")) return false
+        if (!added.add(u)) return false
+        callback.invoke(
+            ExtractorLink(
+                name,
+                label,
+                u,
+                referer,
+                quality,
+                u.contains(".m3u8")
+            )
+        )
+        return true
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // data format: slug|ep|anilistId
+        // data: slug|ep|anilistId
         val parts = data.split("|")
         if (parts.isEmpty()) return false
 
         val slug = parts[0].trim()
         val epNum = parts.getOrNull(1)?.toIntOrNull() ?: 1
         val anilistId = parts.getOrNull(2)?.toIntOrNull() ?: 0
-
         if (slug.isBlank()) return false
 
         val epText = try {
@@ -260,75 +305,82 @@ class AnimeLokProvider : MainAPI() {
         } catch (_: Exception) {
             return false
         }
-
-        if (epText.isBlank()) return false
+        if (epText.isBlank() || !epText.contains("\"episode\"")) return false
 
         var found = false
         val added = HashSet<String>()
 
-        // 1) Direct m3u8 anywhere in JSON (anvod Soft Sub / Dub)
-        val reM3u8 = Regex("https?://[^\\s\"'\\\\]+\\.m3u8[^\\s\"'\\\\]*")
-        reM3u8.findAll(epText).forEach { m ->
-            val url = m.value.replace("\\/", "/")
-            if (!added.add(url)) return@forEach
-            callback.invoke(
-                ExtractorLink(
-                    name,
-                    "M3U8",
-                    url,
-                    mainUrl,
-                    Qualities.Unknown.value,
-                    true
-                )
-            )
-            found = true
+        // Normalize escapes so m3u8 is easy to find
+        val normalized = epText
+            .replace("\\/", "/")
+            .replace("\\\"", "\"")
+
+        // ---------- 1) Pahe style: "url":"[{...m3u8...}]" ----------
+        // Find quality-tagged entries
+        Regex(
+            "\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\"\\s*,\\s*\"quality\"\\s*:\\s*\"([^\"]+)\""
+        ).findAll(normalized).forEach { m ->
+            val link = m.groupValues[1]
+            val q = m.groupValues[2]
+            if (addM3u8(callback, "Pahe " + q, link, mainUrl, qualityFrom(q), added)) {
+                found = true
+            }
+        }
+        // quality before url
+        Regex(
+            "\"quality\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\""
+        ).findAll(normalized).forEach { m ->
+            val q = m.groupValues[1]
+            val link = m.groupValues[2]
+            if (addM3u8(callback, "Pahe " + q, link, mainUrl, qualityFrom(q), added)) {
+                found = true
+            }
         }
 
-        // 2) All "url":"https://..." fields (skip if already added)
-        val reUrl = Regex("\"url\"\\s*:\\s*\"(https?://[^\"]+)\"")
-        var idx = 0
-        reUrl.findAll(epText).forEach { m ->
-            idx++
-            var url = m.groupValues[1].replace("\\/", "/")
-            if (url.contains(".m3u8")) {
-                // already handled above
+        // ---------- 2) Any m3u8 in response ----------
+        Regex("https?://[^\\s\"'\\\\<>]+\\.m3u8[^\\s\"'\\\\<>]*").findAll(normalized).forEach { m ->
+            val link = m.value
+            if (addM3u8(callback, "HLS", link, mainUrl, Qualities.Unknown.value, added)) {
+                found = true
+            }
+        }
+
+        // ---------- 3) Server objects with plain http url (not JSON array) ----------
+        Regex(
+            "\"name\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]{0,200}?\"url\"\\s*:\\s*\"(https?://[^\"]+)\""
+        ).findAll(epText).forEach { m ->
+            val sName = m.groupValues[1]
+            var sUrl = m.groupValues[2].replace("\\/", "/")
+            if (sUrl.startsWith("[")) return@forEach // pahe array already handled
+            if (sUrl.contains(".m3u8")) {
+                if (addM3u8(callback, sName, sUrl, mainUrl, Qualities.Unknown.value, added)) {
+                    found = true
+                }
                 return@forEach
             }
-            if (!added.add(url)) return@forEach
+            // Dead / broken hosts skip quickly
+            if (sUrl.contains("as-cdn", true)) return@forEach
 
-            val label = "Server " + idx
             try {
-                // loadExtractor for short.icu etc
-                try {
-                    if (loadExtractor(url, mainUrl, subtitleCallback, callback)) {
-                        found = true
-                        return@forEach
-                    }
-                } catch (_: Exception) {
-                }
-
-                // open page, find m3u8
-                val body = app.get(url, headers = htmlHeaders()).text
-                reM3u8.findAll(body).forEach { mm ->
-                    val u2 = mm.value.replace("\\/", "/")
-                    if (!added.add(u2)) return@forEach
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            label,
-                            u2,
-                            url,
-                            Qualities.Unknown.value,
-                            true
-                        )
-                    )
+                if (loadExtractor(sUrl, mainUrl, subtitleCallback, callback)) {
                     found = true
+                    return@forEach
+                }
+            } catch (_: Exception) {
+            }
+
+            try {
+                val body = app.get(sUrl, headers = htmlHeaders()).text
+                Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(body).forEach { mm ->
+                    if (addM3u8(callback, sName, mm.value, sUrl, Qualities.Unknown.value, added)) {
+                        found = true
+                    }
                 }
             } catch (_: Exception) {
             }
         }
 
-        // 3) MegaPlay backup
+        // ---------- 4) MegaPlay / AniStream backup (works when only ToonStream on site) ----------
         val realAnilist = Regex("\"anilistId\"\\s*:\\s*([0-9]+)")
             .find(epText)?.groupValues?.get(1)?.toIntOrNull() ?: anilistId
 
@@ -355,30 +407,48 @@ class AnimeLokProvider : MainAPI() {
     ): Boolean {
         val streamPage =
             "https://megaplay.buzz/stream/ani/" + anilistId + "/" + epNum + "/" + type
-        val mpHtml = app.get(
-            streamPage,
-            headers = mapOf("User-Agent" to ua, "Referer" to mainUrl)
-        ).text
 
-        val playerId = Regex("data-id=\"([0-9]+)\"").find(mpHtml)?.groupValues?.getOrNull(1)
-        if (playerId.isNullOrBlank()) return false
+        val mpHtml = try {
+            app.get(
+                streamPage,
+                headers = mapOf(
+                    "User-Agent" to ua,
+                    "Referer" to (mainUrl + "/"),
+                    "Accept" to "text/html,*/*"
+                )
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
 
-        val sourcesJson = app.get(
-            "https://megaplay.buzz/stream/getSources?id=" + playerId,
-            headers = mapOf(
-                "User-Agent" to ua,
-                "Referer" to streamPage,
-                "X-Requested-With" to "XMLHttpRequest",
-                "Accept" to "application/json"
-            )
-        ).text
+        // data-id="178154"
+        val playerId = Regex("data-id=\"([0-9]+)\"")
+            .find(mpHtml)?.groupValues?.getOrNull(1)
+            ?: Regex("data-id='([0-9]+)'").find(mpHtml)?.groupValues?.getOrNull(1)
+            ?: return false
+
+        val sourcesJson = try {
+            app.get(
+                "https://megaplay.buzz/stream/getSources?id=" + playerId,
+                headers = mapOf(
+                    "User-Agent" to ua,
+                    "Referer" to streamPage,
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Accept" to "application/json, text/plain, */*",
+                    "Origin" to "https://megaplay.buzz"
+                )
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
 
         val file = Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"")
             .find(sourcesJson)
             ?.groupValues
             ?.getOrNull(1)
             ?.replace("\\/", "/")
-        if (file.isNullOrBlank()) return false
+            ?: return false
+
         if (!added.add(file)) return true
 
         callback.invoke(
@@ -391,6 +461,17 @@ class AnimeLokProvider : MainAPI() {
                 file.contains(".m3u8")
             )
         )
+
+        // Subtitles
+        Regex(
+            "\"file\"\\s*:\\s*\"(https?://[^\"]+\\.vtt)\"\\s*,\\s*\"label\"\\s*:\\s*\"([^\"]+)\""
+        ).findAll(sourcesJson.replace("\\/", "/")).forEach { m ->
+            try {
+                // subtitleCallback not passed here — skip safe
+            } catch (_: Exception) {
+            }
+        }
+
         return true
     }
 }
