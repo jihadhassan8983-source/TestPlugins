@@ -8,9 +8,8 @@ class ExamplePlugin : BasePlugin() {
     override fun load() {
         registerMainAPI(AnimeThProvider())
         registerMainAPI(AnimeHDProvider())
-        registerMainAPI(AnimeSaltProvider())
         registerMainAPI(AnimeDriveProvider())
         registerMainAPI(AnimeKaiProvider())
-        registerMainAPI(ToonWorld4AllProvider())
+        registerMainAPI(MovieLinkBDProvider())
     }
 }
