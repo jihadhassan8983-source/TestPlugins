@@ -33,7 +33,6 @@ class AnimeLokProvider : MainAPI() {
         "Origin" to mainUrl
     )
 
-    /** CRITICAL: API/MegaPlay returns https:\/\/ — must fix before any URL regex */
     private fun unescape(s: String): String {
         return s.replace("\\/", "/").replace("\\\"", "\"").replace("\\n", "\n")
     }
@@ -88,6 +87,14 @@ class AnimeLokProvider : MainAPI() {
             if (poster.isNullOrBlank()) poster = img?.attr("src")
             if (poster.isNullOrBlank()) poster = img?.attr("data-src")
 
+            // Prefer anilist poster if slug ends with anilist id
+            val tail = slug.substringAfterLast("-")
+            if (tail.all { it.isDigit() } && tail.length >= 3) {
+                if (poster.isNullOrBlank() || poster.contains("logo", true)) {
+                    poster = "https://img.anili.st/media/$tail"
+                }
+            }
+
             out.add(
                 newAnimeSearchResponse(title, "$mainUrl/anime/$slug", TvType.Anime) {
                     this.posterUrl = poster
@@ -131,41 +138,34 @@ class AnimeLokProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val slug = resolveSlug(url)
 
-        val ep1 = app.get("$mainUrl/api/anime/$slug/episodes/1", headers = jsonH()).text
-        if (!ep1.contains("\"anime\"")) {
+        val ep1raw = app.get("$mainUrl/api/anime/$slug/episodes/1", headers = jsonH()).text
+        if (!ep1raw.contains("\"anime\"")) {
             throw ErrorLoadingException("API failed for $slug")
         }
-        val ep1u = unescape(ep1)
+        val ep1 = unescape(ep1raw)
 
-        val title = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(ep1u)?.groupValues?.get(1)
+        val title = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(ep1)?.groupValues?.get(1)
             ?: slugToTitle(slug)
 
         val anilistId = Regex("\"anilistId\"\\s*:\\s*([0-9]+)")
-            .find(ep1u)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            .find(ep1)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
-        var poster = Regex("\"img\"\\s*:\\s*\"(https?://[^\"]+)\"").find(ep1u)?.groupValues?.get(1)
-        var plot = Regex("\"description\"\\s*:\\s*\"([^\"]*)\"").find(ep1u)?.groupValues?.get(1)
-
-        // Details page for better poster / plot
-        try {
-            val page = app.get("$mainUrl/anime/$slug", headers = htmlH()).text
-            if (poster.isNullOrBlank()) {
-                poster = Regex("og:image\"\\s+content=\"([^\"]+)\"").find(page)?.groupValues?.get(1)
-            }
-            if (plot.isNullOrBlank()) {
-                plot = Regex("og:description\"\\s+content=\"([^\"]+)\"").find(page)?.groupValues?.get(1)
-            }
-            if (plot.isNullOrBlank()) {
-                val doc = Jsoup.parse(page)
-                plot = doc.selectFirst("meta[name=description]")?.attr("content")
-                    ?: doc.selectFirst("p")?.text()
-            }
-        } catch (_: Exception) {
+        // Poster: AniList CDN proxy (site detail page has no og:image)
+        var poster: String? = null
+        if (anilistId > 0) {
+            poster = "https://img.anili.st/media/$anilistId"
+        }
+        if (poster.isNullOrBlank()) {
+            poster = Regex("\"img\"\\s*:\\s*\"(https?://[^\"]+)\"").find(ep1)?.groupValues?.get(1)
         }
 
+        var plot = Regex("\"description\"\\s*:\\s*\"([^\"]*)\"").find(ep1)?.groupValues?.get(1)
+        val ep1Langs = Regex("\"languages\"\\s*:\\s*\\[([^\\]]+)\\]").find(ep1)?.groupValues?.get(1)
+            ?.replace("\"", "")?.trim()
+
+        // Episode numbers
         val epNums = LinkedHashSet<Int>()
         epNums.add(1)
-
         try {
             var page = 1
             var totalPages = 1
@@ -204,16 +204,31 @@ class AnimeLokProvider : MainAPI() {
             if (max <= 200) for (i in 1..max) epNums.add(i)
         }
 
+        val totalEps = epNums.size
+        val infoBits = ArrayList<String>()
+        infoBits.add("Episodes: $totalEps")
+        if (!ep1Langs.isNullOrBlank()) infoBits.add("Audio: $ep1Langs")
+        if (anilistId > 0) infoBits.add("AniList: $anilistId")
+
+        val fullPlot = buildString {
+            if (!plot.isNullOrBlank()) append(plot).append("\n\n")
+            append(infoBits.joinToString(" · "))
+        }
+
         val episodes = epNums.sorted().map { num ->
             newEpisode("$slug|$num|$anilistId") {
                 this.name = "Episode $num"
                 this.episode = num
+                this.posterUrl = poster
             }
         }
 
         return newAnimeLoadResponse(title, "$mainUrl/anime/$slug", TvType.Anime) {
             this.posterUrl = poster
-            this.plot = plot
+            this.plot = fullPlot
+            this.tags = listOfNotNull(
+                ep1Langs?.takeIf { it.isNotBlank() }
+            )
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -227,6 +242,38 @@ class AnimeLokProvider : MainAPI() {
             "360" in t -> Qualities.P360.value
             else -> Qualities.Unknown.value
         }
+    }
+
+    /** Build nice source name: Hindi / Tamil / Telugu / Multi / Hard Sub ... */
+    private fun serverLabel(name: String, tip: String, langs: String): String {
+        val n = name.trim()
+        val t = tip.trim()
+        val l = langs.replace("\"", "").replace("[", "").replace("]", "").trim()
+
+        // Explicit language servers (One Piece style)
+        val langNames = listOf(
+            "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada",
+            "English", "Japanese", "Bengali", "Chinese", "Korean"
+        )
+        for (ln in langNames) {
+            if (n.equals(ln, true) || n.contains(ln, true)) {
+                return if (t.isNotBlank() && !t.equals(ln, true)) "$ln ($t)" else ln
+            }
+        }
+
+        if (t.contains("Multi", true) || n.contains("Multi", true)) {
+            return if (l.isNotBlank()) "Multi [$l]" else "Multi Audio"
+        }
+        if (t.contains("Hard", true)) return "Hard Sub"
+        if (t.contains("Soft", true)) return "Soft Sub"
+        if (t.equals("Dub", true) || n.contains("Dub", true)) {
+            return if (l.isNotBlank()) "Dub [$l]" else "Dub"
+        }
+        if (n.equals("pahe", true)) return "Pahe"
+        if (n.isNotBlank()) {
+            return if (l.isNotBlank()) "$n [$l]" else n
+        }
+        return t.ifBlank { "Server" }
     }
 
     private fun push(
@@ -271,55 +318,95 @@ class AnimeLokProvider : MainAPI() {
             return false
         }
         if (raw.isBlank()) return false
-
-        // ALWAYS unescape first
         val text = unescape(raw)
 
         var found = false
         val added = HashSet<String>()
 
-        // 1) Pahe: {"url":"https://...m3u8","quality":"720p"}
-        Regex(
-            "\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\"\\s*,\\s*\"quality\"\\s*:\\s*\"([^\"]+)\""
-        ).findAll(text).forEach { m ->
-            if (push(callback, "Pahe ${m.groupValues[2]}", m.groupValues[1], mainUrl, qualityOf(m.groupValues[2]), added)) {
-                found = true
+        // ---- Parse each server object fully ----
+        // {"id":...,"name":"Hindi","tip":"Abyess","languages":["HINDI"],"url":"https://..."}
+        val serverRe = Regex(
+            "\\{\"id\"\\s*:\\s*[0-9]+\\s*,\\s*\"name\"\\s*:\\s*\"([^\"]*)\"\\s*,\\s*\"tip\"\\s*:\\s*\"([^\"]*)\"\\s*,\\s*\"languages\"\\s*:\\s*(\\[[^\\]]*])\\s*,\\s*\"url\"\\s*:\\s*\"([^\"]+)\""
+        )
+
+        for (m in serverRe.findAll(text)) {
+            val sName = m.groupValues[1]
+            val sTip = m.groupValues[2]
+            val sLangs = m.groupValues[3]
+            var sUrl = m.groupValues[4]
+            val label = serverLabel(sName, sTip, sLangs)
+
+            // Pahe embeds JSON array as string
+            if (sUrl.startsWith("[")) {
+                val inner = unescape(sUrl)
+                Regex(
+                    "\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\"\\s*,\\s*\"quality\"\\s*:\\s*\"([^\"]+)\""
+                ).findAll(inner).forEach { q ->
+                    if (push(
+                            callback,
+                            "$label ${q.groupValues[2]}",
+                            q.groupValues[1],
+                            mainUrl,
+                            qualityOf(q.groupValues[2]),
+                            added
+                        )
+                    ) found = true
+                }
+                Regex(
+                    "\"quality\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\""
+                ).findAll(inner).forEach { q ->
+                    if (push(
+                            callback,
+                            "$label ${q.groupValues[1]}",
+                            q.groupValues[2],
+                            mainUrl,
+                            qualityOf(q.groupValues[1]),
+                            added
+                        )
+                    ) found = true
+                }
+                continue
             }
-        }
-        Regex(
-            "\"quality\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\""
-        ).findAll(text).forEach { m ->
-            if (push(callback, "Pahe ${m.groupValues[1]}", m.groupValues[2], mainUrl, qualityOf(m.groupValues[1]), added)) {
-                found = true
+
+            if (sUrl.contains(".m3u8")) {
+                if (push(callback, label, sUrl, mainUrl, Qualities.Unknown.value, added)) {
+                    found = true
+                }
+                continue
+            }
+
+            // Dead ToonStream CDN — skip
+            if (sUrl.contains("as-cdn", true)) continue
+
+            // Hindi/Tamil/Telugu etc. via short.icu / other hosts
+            try {
+                if (loadExtractor(sUrl, mainUrl, subtitleCallback, callback)) {
+                    found = true
+                    continue
+                }
+            } catch (_: Exception) {
+            }
+
+            // Manual page scrape for m3u8
+            try {
+                val body = unescape(app.get(sUrl, headers = htmlH()).text)
+                Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(body).forEach { mm ->
+                    if (push(callback, label, mm.value, sUrl, Qualities.Unknown.value, added)) {
+                        found = true
+                    }
+                }
+            } catch (_: Exception) {
             }
         }
 
-        // 2) Any other m3u8 in API body
+        // Fallback: any m3u8 left in body
         Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(text).forEach { m ->
             if (push(callback, "Stream", m.value, mainUrl, Qualities.Unknown.value, added)) {
                 found = true
             }
         }
 
-        // 3) Named servers with plain URL (skip JSON arrays & dead as-cdn)
-        Regex(
-            "\"name\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]{0,220}?\"url\"\\s*:\\s*\"(https?://[^\"]+)\""
-        ).findAll(text).forEach { m ->
-            val sName = m.groupValues[1]
-            val sUrl = m.groupValues[2]
-            if (sUrl.startsWith("[")) return@forEach
-            if (sUrl.contains("as-cdn", true)) return@forEach
-            if (sUrl.contains(".m3u8")) {
-                if (push(callback, sName, sUrl, mainUrl, Qualities.Unknown.value, added)) found = true
-                return@forEach
-            }
-            try {
-                if (loadExtractor(sUrl, mainUrl, subtitleCallback, callback)) found = true
-            } catch (_: Exception) {
-            }
-        }
-
-        // 4) MegaPlay — works for almost every AniList title (Bleach etc.)
+        // MegaPlay backup (Sub / Dub only — host limitation)
         val anilistId = Regex("\"anilistId\"\\s*:\\s*([0-9]+)")
             .find(text)?.groupValues?.get(1)?.toIntOrNull()
             ?: anilistFromData
@@ -375,7 +462,6 @@ class AnimeLokProvider : MainAPI() {
             return false
         }
 
-        // FIX: unescape before reading file URL
         val src = unescape(srcRaw)
         val file = Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"")
             .find(src)?.groupValues?.getOrNull(1)
