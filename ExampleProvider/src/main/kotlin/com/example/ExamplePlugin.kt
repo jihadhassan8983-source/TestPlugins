@@ -11,7 +11,6 @@ class ExamplePlugin : BasePlugin() {
         registerMainAPI(AnimeSaltProvider())
         registerMainAPI(AnimeDriveProvider())
         registerMainAPI(AnimeKaiProvider())
-        registerMainAPI(AnimeLokProvider())
-        registerMainAPI(UltraMovieDriveProvider())
+        registerMainAPI(ToonWorld4AllProvider())
     }
 }
