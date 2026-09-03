@@ -174,9 +174,7 @@ class AnimeLokProvider : MainAPI() {
                     if (t.contains("\"number\"")) {
                         epNums.add(n)
                         miss = 0
-                    } else {
-                        miss++
-                    }
+                    } else miss++
                 } catch (_: Exception) {
                     miss++
                 }
@@ -190,7 +188,6 @@ class AnimeLokProvider : MainAPI() {
         val plot = buildString {
             append("Episodes: ${epNums.size}")
             if (!ep1Langs.isNullOrBlank()) append("\nAudio: $ep1Langs")
-            append("\nSources: Zephyrflick / Pahe / AniStream — open episode → Source")
         }
 
         val episodes = epNums.sorted().map { num ->
@@ -238,23 +235,6 @@ class AnimeLokProvider : MainAPI() {
         return true
     }
 
-    private fun langPriority(label: String): Int {
-        val l = label.lowercase()
-        return when {
-            "zephyr" in l -> 0
-            "hindi" in l -> 1
-            "tamil" in l -> 2
-            "telugu" in l -> 3
-            "malayalam" in l -> 4
-            "kannada" in l -> 5
-            "multi" in l -> 6
-            "pahe" in l || "hard" in l -> 7
-            "anistream" in l && "sub" in l -> 8
-            "anistream" in l && "dub" in l -> 9
-            else -> 10
-        }
-    }
-
     private data class Srv(
         val name: String,
         val tip: String,
@@ -262,21 +242,85 @@ class AnimeLokProvider : MainAPI() {
         val url: String
     )
 
+    /**
+     * FIXED: do NOT regex-cut servers array (pahe URL contains "]" and broke parsing).
+     * Walk the JSON with bracket depth instead.
+     */
+    private fun extractServersJson(text: String): String {
+        val key = "\"servers\""
+        val keyIdx = text.indexOf(key)
+        if (keyIdx < 0) return text
+        val start = text.indexOf('[', keyIdx)
+        if (start < 0) return text
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (i in start until text.length) {
+            val c = text[i]
+            if (inStr) {
+                if (esc) esc = false
+                else if (c == '\\') esc = true
+                else if (c == '"') inStr = false
+                continue
+            }
+            when (c) {
+                '"' -> inStr = true
+                '[' -> depth++
+                ']' -> {
+                    depth--
+                    if (depth == 0) return text.substring(start, i + 1)
+                }
+            }
+        }
+        return text.substring(start)
+    }
+
     private fun parseServers(text: String): List<Srv> {
         val out = ArrayList<Srv>()
-        val arr = Regex(
-            "\"servers\"\\s*:\\s*\\[(.*?)]\\s*,\\s*\"subtitles\"",
-            RegexOption.DOT_MATCHES_ALL
-        ).find(text)?.groupValues?.get(1) ?: text
+        val arr = extractServersJson(text)
+        // Each object starts after {"id" or just find url blocks
+        var i = 0
+        while (i < arr.length) {
+            val objStart = arr.indexOf('{', i)
+            if (objStart < 0) break
+            var depth = 0
+            var inStr = false
+            var esc = false
+            var objEnd = -1
+            for (j in objStart until arr.length) {
+                val c = arr[j]
+                if (inStr) {
+                    if (esc) esc = false
+                    else if (c == '\\') esc = true
+                    else if (c == '"') inStr = false
+                    continue
+                }
+                when (c) {
+                    '"' -> inStr = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) {
+                            objEnd = j
+                            break
+                        }
+                    }
+                }
+            }
+            if (objEnd < 0) break
+            val obj = arr.substring(objStart, objEnd + 1)
+            i = objEnd + 1
 
-        val parts = arr.split(Regex("\\{\\s*\"id\""))
-        for (p in parts) {
-            if (!p.contains("\"url\"")) continue
-            val name = Regex("\"name\"\\s*:\\s*\"([^\"]*)\"").find(p)?.groupValues?.get(1) ?: ""
-            val tip = Regex("\"tip\"\\s*:\\s*\"([^\"]*)\"").find(p)?.groupValues?.get(1) ?: ""
-            val langs = Regex("\"languages\"\\s*:\\s*(\\[[^\\]]*])").find(p)?.groupValues?.get(1) ?: "[]"
-            val url = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(p)?.groupValues?.get(1) ?: continue
-            out.add(Srv(name, tip, langs, url))
+            val url = Regex("\"url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
+                .find(obj)?.groupValues?.get(1) ?: continue
+            val name = Regex("\"name\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
+                .find(obj)?.groupValues?.get(1) ?: ""
+            val tip = Regex("\"tip\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
+                .find(obj)?.groupValues?.get(1) ?: ""
+            val langs = Regex("\"languages\"\\s*:\\s*(\\[[^\\]]*])")
+                .find(obj)?.groupValues?.get(1) ?: "[]"
+
+            out.add(Srv(unescape(name), unescape(tip), langs, unescape(url)))
         }
         return out
     }
@@ -285,7 +329,6 @@ class AnimeLokProvider : MainAPI() {
         val n = s.name.trim()
         val t = s.tip.trim()
         val l = s.langs.replace("\"", "").replace("[", "").replace("]", "")
-
         val known = listOf(
             "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada",
             "Bengali", "English", "Japanese"
@@ -299,9 +342,24 @@ class AnimeLokProvider : MainAPI() {
             return if (l.isNotBlank()) "Multi · $l" else "Multi Audio"
         }
         if (t.contains("Hard", true) || n.equals("pahe", true)) return "Hard Sub · Pahe"
-        if (t.contains("Soft", true)) return "Soft Sub"
-        if (t.equals("Dub", true)) return if (l.isNotBlank()) "Dub · $l" else "Dub"
+        if (t.contains("Soft", true)) return "Soft Sub · ${n.ifBlank { "Bato" }}"
+        if (t.equals("Dub", true)) return "Dub · ${l.ifBlank { "English" }}"
         return n.ifBlank { t.ifBlank { "Server" } }
+    }
+
+    private fun langPriority(label: String): Int {
+        val l = label.lowercase()
+        return when {
+            "zephyr" in l || "multi" in l -> 0
+            "hindi" in l -> 1
+            "tamil" in l -> 2
+            "telugu" in l -> 3
+            "soft sub" in l -> 4
+            "dub" in l && "anistream" !in l -> 5
+            "pahe" in l || "hard" in l -> 6
+            "anistream" in l -> 9
+            else -> 7
+        }
     }
 
     override suspend fun loadLinks(
@@ -332,42 +390,24 @@ class AnimeLokProvider : MainAPI() {
             val label = labelOf(s)
             val sUrl = s.url
 
-            // Pahe JSON array of qualities
-            if (sUrl.startsWith("[")) {
-                val inner = unescape(sUrl)
+            // Pahe quality array
+            if (sUrl.trimStart().startsWith("[")) {
+                val inner = sUrl
                 Regex(
                     "\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\"\\s*,\\s*\"quality\"\\s*:\\s*\"([^\"]+)\""
                 ).findAll(inner).forEach { q ->
                     if (push(
-                            callback,
-                            "$label ${q.groupValues[2]}",
-                            q.groupValues[1],
-                            mainUrl,
-                            qualityOf(q.groupValues[2]),
-                            added
-                        )
-                    ) found = true
-                }
-                Regex(
-                    "\"quality\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"url\"\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\""
-                ).findAll(inner).forEach { q ->
-                    if (push(
-                            callback,
-                            "$label ${q.groupValues[1]}",
-                            q.groupValues[2],
-                            mainUrl,
-                            qualityOf(q.groupValues[1]),
-                            added
+                            callback, "$label ${q.groupValues[2]}", q.groupValues[1],
+                            mainUrl, qualityOf(q.groupValues[2]), added
                         )
                     ) found = true
                 }
                 continue
             }
 
-            // Dead ToonStream CDN
             if (sUrl.contains("as-cdn", true)) continue
 
-            // ===== Zephyrflick (best multi-audio) =====
+            // Zephyrflick Multi
             if (sUrl.contains("zephyrflick", true)) {
                 try {
                     if (extractZephyrflick(sUrl, label, callback, added, subtitleCallback)) {
@@ -378,7 +418,7 @@ class AnimeLokProvider : MainAPI() {
                 }
             }
 
-            // Direct m3u8
+            // Direct m3u8 (bato Soft Sub / Dub)
             if (sUrl.contains(".m3u8")) {
                 if (push(callback, label, sUrl, mainUrl, Qualities.Unknown.value, added)) {
                     found = true
@@ -386,28 +426,25 @@ class AnimeLokProvider : MainAPI() {
                 continue
             }
 
-            // Hindi / Tamil / Telugu via short.icu etc.
-            val tryUrls = LinkedHashSet<String>()
-            tryUrls.add(sUrl)
-            if (sUrl.contains("short.icu")) {
-                val code = sUrl.substringAfterLast("/")
-                tryUrls.add("https://short.icu/$code")
-                tryUrls.add("https://short.icu/e/$code")
-                tryUrls.add("https://abyss.to/e/$code")
-            }
-
-            var extracted = false
-            for (tu in tryUrls) {
-                try {
-                    if (loadExtractor(tu, mainUrl, subtitleCallback, callback)) {
-                        found = true
-                        extracted = true
-                        break
-                    }
-                } catch (_: Exception) {
+            // Hindi / Tamil / Telugu — short.icu / Abyss
+            if (sUrl.contains("short.icu") || label.contains("Hindi", true) ||
+                label.contains("Tamil", true) || label.contains("Telugu", true) ||
+                label.contains("Malayalam", true) || label.contains("Kannada", true)
+            ) {
+                if (extractAbyssStyle(sUrl, label, callback, added, subtitleCallback)) {
+                    found = true
+                    continue
                 }
             }
-            if (extracted) continue
+
+            // Generic loadExtractor
+            try {
+                if (loadExtractor(sUrl, mainUrl, subtitleCallback, callback)) {
+                    found = true
+                    continue
+                }
+            } catch (_: Exception) {
+            }
 
             try {
                 val body = unescape(app.get(sUrl, headers = htmlH()).text)
@@ -417,13 +454,6 @@ class AnimeLokProvider : MainAPI() {
                     }
                 }
             } catch (_: Exception) {
-            }
-        }
-
-        // Leftover m3u8 in API body
-        Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(text).forEach { m ->
-            if (push(callback, "Stream", m.value, mainUrl, Qualities.Unknown.value, added)) {
-                found = true
             }
         }
 
@@ -442,9 +472,52 @@ class AnimeLokProvider : MainAPI() {
         return found
     }
 
+    /** Abyss / short.icu language servers */
+    private suspend fun extractAbyssStyle(
+        url: String,
+        label: String,
+        callback: (ExtractorLink) -> Unit,
+        added: HashSet<String>,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Boolean {
+        val code = url.substringAfterLast("/").substringAfter("v=").substringBefore("&").trim()
+        if (code.isBlank()) return false
+
+        val candidates = listOf(
+            url,
+            "https://short.icu/$code",
+            "https://short.icu/e/$code",
+            "https://abysscdn.com/?v=$code",
+            "https://abyss.to/?v=$code",
+            "https://abyss.to/e/$code"
+        )
+
+        for (u in candidates) {
+            try {
+                if (loadExtractor(u, mainUrl, subtitleCallback, callback)) return true
+            } catch (_: Exception) {
+            }
+        }
+
+        // Manual page scrape
+        for (u in candidates) {
+            try {
+                val body = unescape(app.get(u, headers = htmlH()).text)
+                Regex("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").findAll(body).forEach { m ->
+                    push(callback, label, m.value, u, Qualities.Unknown.value, added)
+                }
+                Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"").findAll(body).forEach { m ->
+                    push(callback, label, m.groupValues[1], u, Qualities.Unknown.value, added)
+                }
+                if (added.any { it.startsWith(label) }) return true
+            } catch (_: Exception) {
+            }
+        }
+        return false
+    }
+
     /**
-     * Zephyrflick multi-audio
-     * POST /player/index.php?data={id}&do=getVideo → { "videoSource": "https://...m3u8" }
+     * Zephyrflick: POST /player/index.php?data=ID&do=getVideo → videoSource
      */
     private suspend fun extractZephyrflick(
         playerUrl: String,
@@ -455,139 +528,93 @@ class AnimeLokProvider : MainAPI() {
     ): Boolean {
         val videoId = Regex("/video/([a-f0-9]+)", RegexOption.IGNORE_CASE)
             .find(playerUrl)?.groupValues?.getOrNull(1)
-            ?: playerUrl.substringAfterLast("/").substringBefore("?").trim()
-        if (videoId.isBlank()) return false
+            ?: return false
 
-        val bases = listOf(
-            "https://play.zephyrflick.top",
-            "https://zephyrflick.top"
-        )
-
+        val bases = listOf("https://play.zephyrflick.top", "https://zephyrflick.top")
         var ok = false
+
         for (base in bases) {
             val pageRef = "$base/video/$videoId"
-            val apiUrl = "$base/player/index.php?data=$videoId&do=getVideo"
+            val apiWithQuery = "$base/player/index.php?data=$videoId&do=getVideo"
+            val apiPlain = "$base/player/index.php"
 
+            val headerMap = mapOf(
+                "User-Agent" to ua,
+                "X-Requested-With" to "XMLHttpRequest",
+                "Referer" to pageRef,
+                "Origin" to base,
+                "Accept" to "application/json, text/plain, */*"
+            )
+
+            var body = ""
+            // Method A: POST with query string (matches official extractor)
             try {
-                // Prefer POST (official API)
-                var body = ""
-                try {
-                    body = app.post(
-                        apiUrl,
-                        headers = mapOf(
-                            "User-Agent" to ua,
-                            "X-Requested-With" to "XMLHttpRequest",
-                            "Referer" to pageRef,
-                            "Origin" to base,
-                            "Accept" to "application/json, text/plain, */*"
-                        )
-                    ).text
-                } catch (_: Exception) {
-                    // Fallback GET
-                    try {
-                        body = app.get(
-                            apiUrl,
-                            headers = mapOf(
-                                "User-Agent" to ua,
-                                "X-Requested-With" to "XMLHttpRequest",
-                                "Referer" to pageRef,
-                                "Accept" to "application/json, text/plain, */*"
-                            )
-                        ).text
-                    } catch (_: Exception) {
-                    }
-                }
-
-                if (body.isBlank()) continue
-                val json = unescape(body)
-
-                var videoSource = Regex("\"videoSource\"\\s*:\\s*\"([^\"]+)\"")
-                    .find(json)?.groupValues?.getOrNull(1)
-                if (videoSource.isNullOrBlank()) {
-                    videoSource = Regex("\"file\"\\s*:\\s*\"([^\"]+)\"")
-                        .find(json)?.groupValues?.getOrNull(1)
-                }
-                if (videoSource.isNullOrBlank()) {
-                    videoSource = Regex("https?://[^\\s\"']+\\.m3u8[^\\s\"']*")
-                        .find(json)?.value
-                }
-                if (videoSource.isNullOrBlank()) continue
-                videoSource = unescape(videoSource)
-
-                if (push(
-                        callback,
-                        "Zephyrflick · $label",
-                        videoSource,
-                        base,
-                        Qualities.Unknown.value,
-                        added
-                    )
-                ) {
-                    ok = true
-                }
-
-                // Separate AUDIO tracks (Hindi / Tamil / Telugu …)
-                try {
-                    val master = unescape(
-                        app.get(
-                            videoSource,
-                            headers = mapOf(
-                                "User-Agent" to ua,
-                                "Referer" to base
-                            )
-                        ).text
-                    )
-                    val audioRe = Regex(
-                        """#EXT-X-MEDIA:TYPE=AUDIO[^\n]*NAME="([^"]+)"[^\n]*URI="([^"]+)""""
-                    )
-                    for (m in audioRe.findAll(master)) {
-                        val langName = m.groupValues[1]
-                        var uri = m.groupValues[2]
-                        if (uri.startsWith("//")) uri = "https:$uri"
-                        else if (uri.startsWith("/")) {
-                            val origin = Regex("https?://[^/]+").find(videoSource)?.value ?: base
-                            uri = origin + uri
-                        } else if (!uri.startsWith("http")) {
-                            uri = videoSource.substringBeforeLast("/") + "/" + uri
-                        }
-                        push(
-                            callback,
-                            "Zephyrflick · $langName",
-                            uri,
-                            base,
-                            Qualities.Unknown.value,
-                            added
-                        )
-                    }
-                } catch (_: Exception) {
-                }
-
-                // Subtitles from player page
-                try {
-                    val page = app.get(
-                        pageRef,
-                        headers = mapOf("User-Agent" to ua, "Referer" to mainUrl)
-                    ).text
-                    val subRaw = Regex("""playerjsSubtitle\s*=\s*"([^"]+)"""")
-                        .find(page)?.groupValues?.getOrNull(1)
-                    if (!subRaw.isNullOrBlank()) {
-                        Regex("""\[([^\]]+)]\s*(https?://[^\s\\]+)""")
-                            .findAll(unescape(subRaw))
-                            .forEach { sm ->
-                                try {
-                                    subtitleCallback.invoke(
-                                        SubtitleFile(sm.groupValues[1], sm.groupValues[2])
-                                    )
-                                } catch (_: Exception) {
-                                }
-                            }
-                    }
-                } catch (_: Exception) {
-                }
-
-                if (ok) break
+                body = app.post(apiWithQuery, headers = headerMap).text
             } catch (_: Exception) {
             }
+            // Method B: POST form fields
+            if (body.isBlank() || !body.contains("videoSource")) {
+                try {
+                    body = app.post(
+                        apiPlain,
+                        headers = headerMap + mapOf(
+                            "Content-Type" to "application/x-www-form-urlencoded"
+                        ),
+                        data = mapOf("data" to videoId, "do" to "getVideo")
+                    ).text
+                } catch (_: Exception) {
+                }
+            }
+            // Method C: GET
+            if (body.isBlank() || !body.contains("videoSource")) {
+                try {
+                    body = app.get(apiWithQuery, headers = headerMap).text
+                } catch (_: Exception) {
+                }
+            }
+
+            if (body.isBlank()) continue
+            val json = unescape(body)
+
+            var videoSource = Regex("\"videoSource\"\\s*:\\s*\"([^\"]+)\"")
+                .find(json)?.groupValues?.getOrNull(1)
+            if (videoSource.isNullOrBlank()) {
+                videoSource = Regex("\"file\"\\s*:\\s*\"([^\"]+)\"")
+                    .find(json)?.groupValues?.getOrNull(1)
+            }
+            if (videoSource.isNullOrBlank()) {
+                videoSource = Regex("https?://[^\\s\"']+\\.m3u8[^\\s\"']*").find(json)?.value
+            }
+            if (videoSource.isNullOrBlank()) continue
+            videoSource = unescape(videoSource)
+
+            if (push(callback, "Zephyrflick · $label", videoSource, base, Qualities.Unknown.value, added)) {
+                ok = true
+            }
+
+            // Per-language AUDIO from master playlist
+            try {
+                val master = unescape(
+                    app.get(videoSource, headers = mapOf("User-Agent" to ua, "Referer" to base)).text
+                )
+                Regex(
+                    """#EXT-X-MEDIA:TYPE=AUDIO[^\n]*NAME="([^"]+)"[^\n]*URI="([^"]+)""""
+                ).findAll(master).forEach { m ->
+                    val langName = m.groupValues[1]
+                    var uri = m.groupValues[2]
+                    if (uri.startsWith("//")) uri = "https:$uri"
+                    else if (uri.startsWith("/")) {
+                        val origin = Regex("https?://[^/]+").find(videoSource)?.value ?: base
+                        uri = origin + uri
+                    } else if (!uri.startsWith("http")) {
+                        uri = videoSource.substringBeforeLast("/") + "/" + uri
+                    }
+                    push(callback, "Zephyrflick · $langName", uri, base, Qualities.Unknown.value, added)
+                }
+            } catch (_: Exception) {
+            }
+
+            if (ok) break
         }
 
         if (!ok) {
@@ -608,16 +635,12 @@ class AnimeLokProvider : MainAPI() {
     ): Boolean {
         val pageUrl = "https://megaplay.buzz/stream/ani/$anilistId/$epNum/$type"
         val html = try {
-            app.get(
-                pageUrl,
-                headers = mapOf("User-Agent" to ua, "Referer" to "$mainUrl/")
-            ).text
+            app.get(pageUrl, headers = mapOf("User-Agent" to ua, "Referer" to "$mainUrl/")).text
         } catch (_: Exception) {
             return false
         }
         val playerId = Regex("data-id=\"([0-9]+)\"").find(html)?.groupValues?.getOrNull(1)
             ?: return false
-
         val srcRaw = try {
             app.get(
                 "https://megaplay.buzz/stream/getSources?id=$playerId",
@@ -632,10 +655,8 @@ class AnimeLokProvider : MainAPI() {
         } catch (_: Exception) {
             return false
         }
-
         val file = Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"")
             .find(unescape(srcRaw))?.groupValues?.getOrNull(1) ?: return false
-
         val label = if (type == "sub") {
             "Japanese · Soft Sub (AniStream)"
         } else {
