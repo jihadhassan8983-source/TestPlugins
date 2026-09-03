@@ -16,7 +16,10 @@ class ToonWorld4AllProvider : MainAPI() {
     override var lang = "hi"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(
-        TvType.Anime, TvType.AnimeMovie, TvType.Cartoon, TvType.TvSeries, TvType.Movie
+        TvType.Anime,
+        TvType.AnimeMovie,
+        TvType.TvSeries,
+        TvType.Movie
     )
 
     private val archiveUrl = "https://archive.toonworld4all.me"
@@ -39,12 +42,12 @@ class ToonWorld4AllProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) request.data else {
-            if (request.data.contains("category")) {
-                request.data.trimEnd('/') + "/page/$page/"
-            } else {
-                "$mainUrl/page/$page/"
-            }
+        val url = if (page <= 1) {
+            request.data
+        } else if (request.data.contains("category")) {
+            request.data.trimEnd('/') + "/page/$page/"
+        } else {
+            "$mainUrl/page/$page/"
         }
         return try {
             val html = app.get(url, headers = hdr()).text
@@ -69,60 +72,65 @@ class ToonWorld4AllProvider : MainAPI() {
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
 
-        val selectors = listOf(
-            "article a[href]",
-            ".herald-post a[href]",
-            ".entry-title a[href]",
-            "h2 a[href]",
-            "h3 a[href]"
+        val anchors = doc.select(
+            "article a[href], .herald-post a[href], .entry-title a[href], h2 a[href], h3 a[href]"
         )
-        for (sel in selectors) {
-            for (a in doc.select(sel)) {
-                var href = a.attr("abs:href")
-                if (href.isBlank()) href = a.attr("href")
-                href = href.substringBefore("?").trimEnd('/') + "/"
-                if (!href.contains("toonworld4all.me")) continue
-                if (anySkip(href)) continue
-                if (!seen.add(href)) continue
+        for (a in anchors) {
+            var href = a.attr("abs:href")
+            if (href.isBlank()) href = a.attr("href")
+            href = href.substringBefore("?").trimEnd('/') + "/"
+            if (!href.contains("toonworld4all.me")) continue
+            if (anySkip(href)) continue
+            if (!seen.add(href)) continue
 
-                var title = a.text().trim()
-                if (title.isBlank()) title = a.attr("title").trim()
-                if (title.length < 3) continue
+            var title = a.text().trim()
+            if (title.isBlank()) title = a.attr("title").trim()
+            if (title.length < 3) continue
 
-                var poster: String? = null
-                val parent = a.parents().firstOrNull {
-                    it.selectFirst("img") != null
-                }
-                val img = a.selectFirst("img") ?: parent?.selectFirst("img")
-                if (img != null) {
-                    poster = img.attr("abs:src").ifBlank { img.attr("src") }
-                    if (poster.isNullOrBlank()) poster = img.attr("data-src")
-                }
-
-                val type = when {
-                    title.contains("Movie", true) -> TvType.Movie
-                    title.contains("Season", true) || title.contains("Episode", true) -> TvType.TvSeries
-                    else -> TvType.Anime
-                }
-
-                out.add(
-                    newAnimeSearchResponse(title, href, type) {
-                        this.posterUrl = poster
-                    }
-                )
-                if (out.size >= 40) return out
+            var poster: String? = null
+            val img = a.selectFirst("img")
+            if (img != null) {
+                poster = img.attr("abs:src")
+                if (poster.isNullOrBlank()) poster = img.attr("src")
+                if (poster.isNullOrBlank()) poster = img.attr("data-src")
             }
+            if (poster.isNullOrBlank()) {
+                val art = a.closest("article")
+                val img2 = art?.selectFirst("img")
+                if (img2 != null) {
+                    poster = img2.attr("abs:src")
+                    if (poster.isNullOrBlank()) poster = img2.attr("src")
+                    if (poster.isNullOrBlank()) poster = img2.attr("data-src")
+                }
+            }
+
+            val type = when {
+                title.contains("Movie", true) -> TvType.Movie
+                title.contains("Season", true) || title.contains("Episode", true) -> TvType.TvSeries
+                else -> TvType.Anime
+            }
+
+            out.add(
+                newAnimeSearchResponse(title, href, type) {
+                    this.posterUrl = poster
+                }
+            )
+            if (out.size >= 40) break
         }
         return out
     }
 
     private fun anySkip(href: String): Boolean {
         val h = href.lowercase()
-        return listOf(
+        val bad = listOf(
             "/category/", "/tag/", "/author/", "/page/", "/feed",
             "wp-", "contact", "dmca", "how-to", "list_25", "shows-list",
-            "exclusive", "first-on", "xmlrpc", "#"
-        ).any { it in h }
+            "exclusive", "first-on", "xmlrpc"
+        )
+        for (b in bad) {
+            if (h.contains(b)) return true
+        }
+        return false
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -132,7 +140,11 @@ class ToonWorld4AllProvider : MainAPI() {
 
         var title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim().orEmpty()
         if (title.isBlank()) {
-            title = doc.selectFirst("title")?.text()?.substringBefore("–")?.substringBefore("|")?.trim().orEmpty()
+            title = doc.selectFirst("title")?.text()
+                ?.substringBefore("–")
+                ?.substringBefore("|")
+                ?.trim()
+                .orEmpty()
         }
 
         var poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
@@ -143,35 +155,26 @@ class ToonWorld4AllProvider : MainAPI() {
         val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
             ?: doc.selectFirst(".entry-content p")?.text()
 
-        // Episode links on archive.toonworld4all.me
         val episodes = ArrayList<Episode>()
         val seen = HashSet<String>()
+
         for (a in doc.select(".entry-content a[href], article a[href]")) {
             var href = a.attr("abs:href")
             if (href.isBlank()) href = a.attr("href")
-            if (!href.contains("archive.toonworld4all.me/episode/") &&
-                !href.contains("/episode/")
-            ) continue
+
+            val isEp = href.contains("archive.toonworld4all.me/episode/") ||
+                href.contains("/episode/")
+            if (!isEp) continue
 
             if (href.startsWith("/")) href = archiveUrl + href
             if (!href.startsWith("http")) continue
             if (!seen.add(href)) continue
 
             val slugPart = href.substringAfter("/episode/").substringBefore("?").trimEnd('/')
-            // e.g. reincarnated-as-slime-4x12  or jojos-bizarre-adventure-3x1
             var epNum: Int? = null
-            val m = Regex("(?:x|e|ep)?(\\d+)$", RegexOption.IGNORE_CASE).find(
-                slugPart.substringAfterLast("-").let {
-                    if (it.contains("x")) it.substringAfter("x") else it
-                }
-            )
-            // better: NxM pattern
             val nm = Regex("(\\d+)x(\\d+)$", RegexOption.IGNORE_CASE).find(slugPart)
             if (nm != null) {
                 epNum = nm.groupValues[2].toIntOrNull()
-            } else {
-                epNum = Regex("(?:episode[- ]?)(\\d+)", RegexOption.IGNORE_CASE)
-                    .find(slugPart)?.groupValues?.get(1)?.toIntOrNull()
             }
 
             val name = a.text().trim().ifBlank {
@@ -188,16 +191,13 @@ class ToonWorld4AllProvider : MainAPI() {
         }
 
         if (episodes.isNotEmpty()) {
-            val sorted = episodes.sortedWith(
-                compareBy(nullsLast()) { it.episode }
-            )
-            return newTvSeriesLoadResponse(title, pageUrl, TvType.TvSeries, sorted) {
+            episodes.sortBy { it.episode ?: 9999 }
+            return newTvSeriesLoadResponse(title, pageUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.plot = plot
             }
         }
 
-        // Single / movie — use page itself
         return newMovieLoadResponse(title, pageUrl, TvType.Movie, pageUrl) {
             this.posterUrl = poster
             this.plot = plot
@@ -214,20 +214,20 @@ class ToonWorld4AllProvider : MainAPI() {
         if (page.startsWith("/episode/")) page = archiveUrl + page
         if (!page.startsWith("http")) page = "\( mainUrl/ \){page.trimStart('/')}"
 
-        // If main site post URL, try first archive episode link
         if (page.contains("toonworld4all.me") && !page.contains("archive.")) {
             try {
-                val html = app.get(page, headers = hdr()).text
-                val doc = Jsoup.parse(html, mainUrl)
-                val ep = doc.select(".entry-content a[href*=archive.toonworld4all], .entry-content a[href*=/episode/]")
-                    .firstOrNull()?.attr("abs:href")
+                val html0 = app.get(page, headers = hdr()).text
+                val doc0 = Jsoup.parse(html0, mainUrl)
+                val ep = doc0.select(
+                    ".entry-content a[href*=archive.toonworld4all], .entry-content a[href*=/episode/]"
+                ).firstOrNull()?.attr("abs:href")
                 if (!ep.isNullOrBlank()) page = ep
             } catch (_: Exception) {
             }
         }
 
         val html = try {
-            app.get(page, headers = hdr(archiveUrl + "/")).text
+            app.get(page, headers = hdr("$archiveUrl/")).text
         } catch (_: Exception) {
             return false
         }
@@ -235,20 +235,16 @@ class ToonWorld4AllProvider : MainAPI() {
         var found = false
         val added = HashSet<String>()
 
-        // Parse window.__PROPS__ encodes → hosts
         val props = extractPropsJson(html)
         if (props != null) {
-            // "host":"GDFlix" ... "link":"/redirect/TOKEN"
             val pairRe = Regex(
                 "\"host\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]{0,200}?\"link\"\\s*:\\s*\"(/redirect/[a-f0-9]+)\""
             )
-            val codecRe = Regex("\"codec\"\\s*:\\s*\"([^\"]+)\"")
-
-            // Split by encodes objects roughly
             val blocks = props.split("\"resolution\"")
             for (block in blocks) {
-                val codec = Regex("\"readable\"\\s*:\\s*\\{[^}]*\"codec\"\\s*:\\s*\"([^\"]+)\"")
-                    .find(block)?.groupValues?.get(1)
+                val codec = Regex(
+                    "\"readable\"\\s*:\\s*\\{[^}]*\"codec\"\\s*:\\s*\"([^\"]+)\""
+                ).find(block)?.groupValues?.get(1)
                     ?: Regex("\"codec\"\\s*:\\s*\"([^\"]+)\"").find(block)?.groupValues?.get(1)
                     ?: ""
 
@@ -257,18 +253,14 @@ class ToonWorld4AllProvider : MainAPI() {
                     val link = m.groupValues[2]
                     val full = if (link.startsWith("http")) link else archiveUrl + link
                     val label = if (codec.isNotBlank()) "$host · $codec" else host
-
                     if (!added.add(full)) continue
 
-                    // Resolve redirect page for final host URL, then extract
                     try {
                         if (resolveAndExtract(full, label, callback, subtitleCallback, added)) {
                             found = true
                         }
                     } catch (_: Exception) {
                     }
-
-                    // Also try loadExtractor on redirect URL itself
                     try {
                         if (loadExtractor(full, archiveUrl, subtitleCallback, callback)) {
                             found = true
@@ -279,7 +271,6 @@ class ToonWorld4AllProvider : MainAPI() {
             }
         }
 
-        // Fallback: any /redirect/ on page
         Regex("""href="(/redirect/[a-f0-9]+)"""").findAll(html).forEach { m ->
             val full = archiveUrl + m.groupValues[1]
             if (!added.add(full)) return@forEach
@@ -302,12 +293,11 @@ class ToonWorld4AllProvider : MainAPI() {
         if (start < 0) return null
         var depth = 0
         for (i in start until html.length) {
-            when (html[i]) {
-                '{' -> depth++
-                '}' -> {
-                    depth--
-                    if (depth == 0) return html.substring(start, i + 1)
-                }
+            val c = html[i]
+            if (c == '{') depth++
+            else if (c == '}') {
+                depth--
+                if (depth == 0) return html.substring(start, i + 1)
             }
         }
         return null
@@ -321,35 +311,31 @@ class ToonWorld4AllProvider : MainAPI() {
         added: HashSet<String>
     ): Boolean {
         val body = try {
-            app.get(
-                redirectUrl,
-                headers = hdr(archiveUrl + "/"),
-                allowRedirects = true
-            ).text
+            app.get(redirectUrl, headers = hdr("$archiveUrl/")).text
         } catch (_: Exception) {
             return false
         }
 
         var ok = false
-
-        // Final host URLs on redirect page
         val hosts = listOf(
-            "filepress", "gdflix", "gdtot", "drive", "mega.nz",
+            "filepress", "gdflix", "gdtot", "drive.google", "mega.nz",
             "hubcloud", "pixeldrain", "workdrive", "video-seeds", "nexdrive"
         )
         val foundUrls = LinkedHashSet<String>()
 
         Regex("""https?://[^\"'\s<>]+""").findAll(body).forEach { m ->
             val u = m.value
-            if (hosts.any { it in u.lowercase() }) {
-                // skip pure domain roots without path id
-                if (u.count { it == '/' } >= 3) foundUrls.add(u.trimEnd('"', '\'', ')', ','))
+            val low = u.lowercase()
+            if (hosts.any { low.contains(it) }) {
+                if (u.count { it == '/' } >= 3) {
+                    foundUrls.add(u.trimEnd('"', '\'', ')', ','))
+                }
             }
         }
-        // href targets
         Regex("""href="(https?://[^"]+)"""").findAll(body).forEach { m ->
             val u = m.groupValues[1]
-            if (hosts.any { it in u.lowercase() }) foundUrls.add(u)
+            val low = u.lowercase()
+            if (hosts.any { low.contains(it) }) foundUrls.add(u)
         }
 
         for (u in foundUrls) {
@@ -361,7 +347,6 @@ class ToonWorld4AllProvider : MainAPI() {
                 }
             } catch (_: Exception) {
             }
-            // Direct m3u8/mp4
             if (u.contains(".m3u8") || u.contains(".mp4")) {
                 callback.invoke(
                     ExtractorLink(
@@ -376,7 +361,6 @@ class ToonWorld4AllProvider : MainAPI() {
                 ok = true
             }
         }
-
         return ok
     }
 }
