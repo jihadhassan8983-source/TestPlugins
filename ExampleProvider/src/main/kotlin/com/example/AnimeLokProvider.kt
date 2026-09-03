@@ -22,13 +22,15 @@ class AnimeLokProvider : MainAPI() {
 
     private fun htmlH() = mapOf(
         "User-Agent" to ua,
-        "Accept" to "text/html,*/*",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9,hi;q=0.8",
         "Referer" to "$mainUrl/"
     )
 
     private fun jsonH() = mapOf(
         "User-Agent" to ua,
-        "Accept" to "application/json,*/*",
+        "Accept" to "application/json, text/plain, */*",
+        "Accept-Language" to "en-US,en;q=0.9,hi;q=0.8",
         "Referer" to "$mainUrl/",
         "Origin" to mainUrl
     )
@@ -45,7 +47,8 @@ class AnimeLokProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
         return try {
-            newHomePageResponse(request.name, parseCards(app.get(request.data, headers = htmlH()).text), false)
+            val html = app.get(request.data, headers = htmlH()).text
+            newHomePageResponse(request.name, parseCards(html), false)
         } catch (_: Exception) {
             newHomePageResponse(request.name, emptyList(), false)
         }
@@ -69,21 +72,27 @@ class AnimeLokProvider : MainAPI() {
             if (href.isBlank()) href = a.attr("href")
             val slug = href.substringAfter("/anime/").substringBefore("/").substringBefore("?").trim()
             if (slug.isBlank() || slug == "cover" || !seen.add(slug)) continue
+
             val img = a.selectFirst("img")
             var title = img?.attr("alt")?.trim().orEmpty()
             if (title.isBlank() || title.equals("Animelok", true)) title = a.attr("title").trim()
             if (title.isBlank()) title = a.text().trim()
             if (title.isBlank()) title = slug.replace("-", " ")
             if (title.length < 2) continue
-            var poster = img?.attr("abs:src") ?: img?.attr("src")
+
+            var poster = img?.attr("abs:src") ?: img?.attr("src") ?: img?.attr("data-src")
             val id = slug.substringAfterLast("-")
             if (id.all { it.isDigit() } && id.length >= 2) {
-                if (poster.isNullOrBlank() || poster.contains("logo", true))
+                if (poster.isNullOrBlank() || poster.contains("logo", true)) {
                     poster = "https://img.anili.st/media/$id"
+                }
             }
-            out.add(newAnimeSearchResponse(title, "$mainUrl/anime/$slug", TvType.Anime) {
-                this.posterUrl = poster
-            })
+
+            out.add(
+                newAnimeSearchResponse(title, "$mainUrl/anime/$slug", TvType.Anime) {
+                    this.posterUrl = poster
+                }
+            )
         }
         return out.distinctBy { it.url }
     }
@@ -106,7 +115,9 @@ class AnimeLokProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val slug = resolveSlug(url)
         val ep1 = unesc(app.get("$mainUrl/api/anime/$slug/episodes/1", headers = jsonH()).text)
-        if (!ep1.contains("\"anime\"")) throw ErrorLoadingException("API failed: $slug")
+        if (!ep1.contains("\"anime\"")) {
+            throw ErrorLoadingException("API failed: $slug")
+        }
 
         val title = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(ep1)?.groupValues?.get(1)
             ?: slug.replace("-", " ")
@@ -186,64 +197,106 @@ class AnimeLokProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|")
-        val slug = parts.getOrNull(0)?.trim().orEmpty()
-        val epNum = parts.getOrNull(1)?.toIntOrNull() ?: 1
-        val anilistFromData = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        var slug = data
+        var epNum = 1
+        var anilistId = 0
+
+        if (data.contains("|")) {
+            val parts = data.split("|")
+            slug = parts[0].trim()
+            epNum = parts.getOrNull(1)?.toIntOrNull() ?: 1
+            anilistId = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        }
+        if (slug.contains("/anime/")) {
+            slug = slug.substringAfterLast("/anime/").substringBefore("/").substringBefore("?")
+        }
+        if (slug.contains("/watch/")) {
+            slug = slug.substringAfterLast("/watch/").substringBefore("/").substringBefore("?")
+        }
+        slug = slug.trim()
         if (slug.isBlank()) return false
 
-        val raw = try {
-            app.get("$mainUrl/api/anime/$slug/episodes/$epNum", headers = jsonH()).text
+        // Session / cookies first (mobile often needs this)
+        try {
+            app.get("$mainUrl/home", headers = htmlH()).text
         } catch (_: Exception) {
-            ""
         }
+        try {
+            app.get("$mainUrl/anime/$slug", headers = htmlH()).text
+        } catch (_: Exception) {
+        }
+
+        val apiHeaders = mapOf(
+            "User-Agent" to ua,
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Language" to "en-US,en;q=0.9,hi;q=0.8",
+            "Referer" to "$mainUrl/anime/$slug",
+            "Origin" to mainUrl,
+            "Sec-Fetch-Dest" to "empty",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Site" to "same-origin"
+        )
+
+        var raw = ""
+        try {
+            raw = app.get(
+                "$mainUrl/api/anime/$slug/episodes/$epNum",
+                headers = apiHeaders
+            ).text
+        } catch (_: Exception) {
+        }
+        if (raw.isBlank() || !raw.contains("servers")) {
+            try {
+                raw = app.get(
+                    "$mainUrl/api/anime/$slug/episodes/$epNum",
+                    headers = jsonH()
+                ).text
+            } catch (_: Exception) {
+            }
+        }
+
         val text = unesc(raw)
         var found = false
         val added = HashSet<String>()
 
-        // ========== 1) ALL direct m3u8 in API (bato + pahe) ==========
+        // 1) All direct m3u8
         Regex("https?://[^\\s\"'\\\\<>]+\\.m3u8[^\\s\"'\\\\<>]*").findAll(text).forEach { m ->
             val u = m.value
             val label = when {
-                "vault-" in u || "uwucdn" in u || "owocdn" in u -> "Pahe HLS"
-                "anvod" in u || "anivid" in u || "anixl" in u -> "Soft/Dub HLS"
-                else -> "HLS"
+                "vault" in u || "uwucdn" in u || "owocdn" in u -> "Pahe"
+                "anvod" in u || "anivid" in u || "anixl" in u -> "HLS Server"
+                else -> "Stream"
             }
             if (add(callback, label, u, mainUrl, added)) found = true
         }
 
-        // ========== 2) Zephyrflick — EVERY video id in response ==========
-        Regex("https?://play\\.zephyrflick\\.top/video/([a-f0-9]+)").findAll(text).forEach { m ->
-            val id = m.groupValues[1]
-            if (zf(id, callback, added, subtitleCallback)) found = true
+        // 2) Zephyrflick
+        Regex("play\\.zephyrflick\\.top/video/([a-f0-9]+)").findAll(text).forEach { m ->
+            if (zf(m.groupValues[1], callback, added, subtitleCallback)) found = true
         }
         Regex("zephyrflick\\.top/video/([a-f0-9]+)").findAll(text).forEach { m ->
-            val id = m.groupValues[1]
-            if (zf(id, callback, added, subtitleCallback)) found = true
+            if (zf(m.groupValues[1], callback, added, subtitleCallback)) found = true
         }
 
-        // ========== 3) Hindi / Tamil / Telugu / etc (short.icu) ==========
-        // Map name near url when possible
-        val langServers = listOf(
+        // 3) Hindi / Tamil / Telugu / ...
+        for (lang in listOf(
             "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada", "English", "Japanese", "Bengali"
-        )
-        for (lang in langServers) {
-            // "name":"Hindi" ... "url":"https://short.icu/xxx"
-            val re = Regex(
-                "\"name\"\\s*:\\s*\"$lang\"[\\s\\S]{0,400}?\"url\"\\s*:\\s*\"(https?://[^\"]+)\""
-            )
-            re.find(text)?.groupValues?.getOrNull(1)?.let { u ->
+        )) {
+            Regex(
+                "\"name\"\\s*:\\s*\"$lang\"[\\s\\S]{0,500}?\"url\"\\s*:\\s*\"(https?://[^\"]+)\""
+            ).find(text)?.groupValues?.getOrNull(1)?.let { u ->
                 if (langLink(lang, u, callback, added, subtitleCallback)) found = true
             }
         }
-        // Any remaining short.icu
         Regex("https?://short\\.icu/([A-Za-z0-9_-]+)").findAll(text).forEach { m ->
             if (langLink("Abyess", m.value, callback, added, subtitleCallback)) found = true
         }
 
-        // ========== 4) AniStream backup ==========
-        val anilistId = Regex("\"anilistId\"\\s*:\\s*([0-9]+)")
-            .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: anilistFromData
+        // 4) AniStream backup
+        if (anilistId <= 0) {
+            anilistId = Regex("\"anilistId\"\\s*:\\s*([0-9]+)")
+                .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        }
         if (anilistId > 0) {
             for (type in listOf("sub", "dub")) {
                 if (mega(anilistId, epNum, type, callback, added)) found = true
@@ -270,6 +323,7 @@ class AnimeLokProvider : MainAPI() {
                 "Origin" to base,
                 "Accept" to "*/*"
             )
+
             var body = ""
             try {
                 body = app.post(api, headers = headers).text
@@ -285,12 +339,15 @@ class AnimeLokProvider : MainAPI() {
                 try {
                     body = app.post(
                         "$base/player/index.php",
-                        headers = headers + mapOf("Content-Type" to "application/x-www-form-urlencoded"),
+                        headers = headers + mapOf(
+                            "Content-Type" to "application/x-www-form-urlencoded"
+                        ),
                         data = mapOf("data" to videoId, "do" to "getVideo")
                     ).text
                 } catch (_: Exception) {
                 }
             }
+
             val json = unesc(body)
             var src = Regex("\"videoSource\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.getOrNull(1)
             if (src.isNullOrBlank()) {
@@ -303,10 +360,13 @@ class AnimeLokProvider : MainAPI() {
             src = unesc(src)
 
             if (add(callback, "Zephyrflick Multi", src, base, added)) {
-                // Audio tracks
                 try {
-                    val master = unesc(app.get(src, headers = mapOf("User-Agent" to ua, "Referer" to base)).text)
-                    Regex("""#EXT-X-MEDIA:TYPE=AUDIO[^\n]*NAME="([^"]+)"[^\n]*URI="([^"]+)"""").findAll(master).forEach { am ->
+                    val master = unesc(
+                        app.get(src, headers = mapOf("User-Agent" to ua, "Referer" to base)).text
+                    )
+                    Regex(
+                        """#EXT-X-MEDIA:TYPE=AUDIO[^\n]*NAME="([^"]+)"[^\n]*URI="([^"]+)""""
+                    ).findAll(master).forEach { am ->
                         var uri = am.groupValues[2]
                         if (uri.startsWith("/")) {
                             uri = (Regex("https?://[^/]+").find(src)?.value ?: base) + uri
@@ -321,8 +381,13 @@ class AnimeLokProvider : MainAPI() {
             }
         }
         try {
-            if (loadExtractor("https://play.zephyrflick.top/video/$videoId", mainUrl, subtitleCallback, callback))
-                return true
+            if (loadExtractor(
+                    "https://play.zephyrflick.top/video/$videoId",
+                    mainUrl,
+                    subtitleCallback,
+                    callback
+                )
+            ) return true
         } catch (_: Exception) {
         }
         return false
@@ -358,7 +423,6 @@ class AnimeLokProvider : MainAPI() {
                 Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"").findAll(body).forEach { m ->
                     add(callback, label, m.groupValues[1], u, added)
                 }
-                if (added.any { it.contains("m3u8") }) return true
             } catch (_: Exception) {
             }
         }
@@ -378,7 +442,8 @@ class AnimeLokProvider : MainAPI() {
         } catch (_: Exception) {
             return false
         }
-        val playerId = Regex("data-id=\"([0-9]+)\"").find(html)?.groupValues?.getOrNull(1) ?: return false
+        val playerId = Regex("data-id=\"([0-9]+)\"").find(html)?.groupValues?.getOrNull(1)
+            ?: return false
         val srcRaw = try {
             app.get(
                 "https://megaplay.buzz/stream/getSources?id=$playerId",
@@ -394,7 +459,11 @@ class AnimeLokProvider : MainAPI() {
         }
         val file = Regex("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"")
             .find(unesc(srcRaw))?.groupValues?.getOrNull(1) ?: return false
-        val label = if (type == "sub") "Japanese Soft Sub (AniStream)" else "English Dub (AniStream)"
+        val label = if (type == "sub") {
+            "Japanese Soft Sub (AniStream)"
+        } else {
+            "English Dub (AniStream)"
+        }
         return add(callback, label, file, "https://megaplay.buzz/", added)
     }
 }
