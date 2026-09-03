@@ -63,41 +63,80 @@ class ToonWorld4AllProvider : MainAPI() {
         }
     }
 
+    private fun pickPoster(img: org.jsoup.nodes.Element?): String? {
+        if (img == null) return null
+        val keys = listOf(
+            "abs:src", "src", "data-src", "data-lazy-src",
+            "data-original", "data-lazy", "data-bg"
+        )
+        for (k in keys) {
+            val v = if (k.startsWith("abs:")) img.attr(k) else img.attr(k)
+            if (!v.isNullOrBlank() && v.startsWith("http") && !v.contains("data:image")) {
+                return v
+            }
+        }
+        // srcset first url
+        val srcset = img.attr("srcset")
+        if (srcset.isNotBlank()) {
+            val first = srcset.split(",").firstOrNull()?.trim()?.substringBefore(" ")
+            if (!first.isNullOrBlank() && first.startsWith("http")) return first
+        }
+        return null
+    }
+
     private fun parseCards(html: String): List<SearchResponse> {
         val doc = Jsoup.parse(html, mainUrl)
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
 
-        for (a in doc.select("article a[href], .entry-title a[href], h2 a[href], h3 a[href]")) {
-            var href = a.attr("abs:href")
-            if (href.isBlank()) href = a.attr("href")
-            href = href.substringBefore("?").trimEnd('/') + "/"
-            if (!href.contains("toonworld4all.me")) continue
-            if (shouldSkip(href)) continue
-            if (!seen.add(href)) continue
+        // Prefer article blocks so poster is from same card
+        val articles = doc.select("article")
+        if (articles.isNotEmpty()) {
+            for (art in articles) {
+                val a = art.selectFirst("h2 a[href], h3 a[href], .entry-title a[href], a[href]")
+                    ?: continue
+                var href = a.attr("abs:href")
+                if (href.isBlank()) href = a.attr("href")
+                href = href.substringBefore("#").substringBefore("?").trimEnd('/') + "/"
+                if (!href.contains("toonworld4all.me")) continue
+                if (shouldSkip(href)) continue
+                if (!seen.add(href)) continue
 
-            var title = a.text().trim()
-            if (title.isBlank()) title = a.attr("title").trim()
-            if (title.length < 3) continue
+                var title = a.text().trim()
+                if (title.isBlank()) title = a.attr("title").trim()
+                if (title.length < 3) continue
+                if (title.contains("Comments", true)) continue
 
-            var poster: String? = null
-            val img = a.selectFirst("img")
-            if (img != null) {
-                poster = img.attr("abs:src")
-                if (poster.isNullOrBlank()) poster = img.attr("src")
-                if (poster.isNullOrBlank()) poster = img.attr("data-src")
+                val poster = pickPoster(art.selectFirst("img"))
+
+                val type = when {
+                    title.contains("Movie", true) -> TvType.Movie
+                    title.contains("Season", true) -> TvType.TvSeries
+                    else -> TvType.Anime
+                }
+
+                out.add(newAnimeSearchResponse(title, href, type) {
+                    this.posterUrl = poster
+                })
+                if (out.size >= 40) break
             }
+        }
 
-            val type = when {
-                title.contains("Movie", true) -> TvType.Movie
-                title.contains("Season", true) -> TvType.TvSeries
-                else -> TvType.Anime
+        if (out.isEmpty()) {
+            for (a in doc.select("h2 a[href], h3 a[href], .entry-title a[href]")) {
+                var href = a.attr("abs:href")
+                if (href.isBlank()) href = a.attr("href")
+                href = href.substringBefore("#").substringBefore("?").trimEnd('/') + "/"
+                if (!href.contains("toonworld4all.me")) continue
+                if (shouldSkip(href)) continue
+                if (!seen.add(href)) continue
+                var title = a.text().trim()
+                if (title.isBlank() || title.contains("Comments", true)) continue
+                val poster = pickPoster(a.selectFirst("img"))
+                out.add(newAnimeSearchResponse(title, href, TvType.Anime) {
+                    this.posterUrl = poster
+                })
             }
-
-            out.add(newAnimeSearchResponse(title, href, type) {
-                this.posterUrl = poster
-            })
-            if (out.size >= 40) break
         }
         return out
     }
@@ -115,25 +154,23 @@ class ToonWorld4AllProvider : MainAPI() {
             h.contains("how-to") ||
             h.contains("list_25") ||
             h.contains("shows-list") ||
-            h.contains("xmlrpc")
+            h.contains("xmlrpc") ||
+            h.contains("#comments")
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val pageUrl = url.substringBefore("?").trimEnd('/') + "/"
+        val pageUrl = url.substringBefore("#").substringBefore("?").trimEnd('/') + "/"
         val html = app.get(pageUrl, headers = hdr()).text
         val doc = Jsoup.parse(html, mainUrl)
 
         var title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim().orEmpty()
         if (title.isBlank()) {
-            title = doc.selectFirst("title")?.text()
-                ?.substringBefore("|")
-                ?.trim()
-                .orEmpty()
+            title = doc.selectFirst("title")?.text()?.substringBefore("|")?.trim().orEmpty()
         }
 
         var poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
         if (poster.isNullOrBlank()) {
-            poster = doc.selectFirst(".entry-content img, article img")?.attr("abs:src")
+            poster = pickPoster(doc.selectFirst(".entry-content img, article img, img.wp-post-image"))
         }
 
         val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
@@ -157,9 +194,7 @@ class ToonWorld4AllProvider : MainAPI() {
             val slugPart = href.substringAfter("/episode/").substringBefore("?").trimEnd('/')
             var epNum: Int? = null
             val nm = Regex("(\\d+)x(\\d+)$", RegexOption.IGNORE_CASE).find(slugPart)
-            if (nm != null) {
-                epNum = nm.groupValues[2].toIntOrNull()
-            }
+            if (nm != null) epNum = nm.groupValues[2].toIntOrNull()
 
             val epName = a.text().trim().ifBlank {
                 if (epNum != null) "Episode $epNum" else slugPart
@@ -200,6 +235,7 @@ class ToonWorld4AllProvider : MainAPI() {
         if (page.startsWith("/episode/")) page = archiveUrl + page
         if (!page.startsWith("http")) page = "$mainUrl/" + page.trimStart('/')
 
+        // Movie post -> first archive episode
         if (page.contains("toonworld4all.me") && !page.contains("archive.")) {
             try {
                 val html0 = app.get(page, headers = hdr()).text
@@ -225,11 +261,12 @@ class ToonWorld4AllProvider : MainAPI() {
 
         var found = false
         val added = HashSet<String>()
-        val props = extractPropsJson(html)
+        val props = extractJsonObject(html, "window.__PROPS__")
 
-        if (props != null) {
+        // Episode page: list of encodes -> /redirect/TOKEN
+        if (props != null && props.contains("encodes")) {
             val pairRe = Regex(
-                "\"host\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]{0,200}?\"link\"\\s*:\\s*\"(/redirect/[a-f0-9]+)\""
+                "\"host\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]{0,250}?\"link\"\\s*:\\s*\"(/redirect/[a-f0-9]+)\""
             )
             val blocks = props.split("\"resolution\"")
             for (block in blocks) {
@@ -239,19 +276,11 @@ class ToonWorld4AllProvider : MainAPI() {
 
                 for (m in pairRe.findAll(block)) {
                     val host = m.groupValues[1]
-                    val link = m.groupValues[2]
-                    val full = archiveUrl + link
+                    val redir = archiveUrl + m.groupValues[2]
                     val label = if (codec.isNotBlank()) "$host $codec" else host
-                    if (!added.add(full)) continue
-
+                    if (!added.add(redir)) continue
                     try {
-                        if (resolveAndExtract(full, label, callback, subtitleCallback, added)) {
-                            found = true
-                        }
-                    } catch (_: Exception) {
-                    }
-                    try {
-                        if (loadExtractor(full, archiveUrl, subtitleCallback, callback)) {
+                        if (openRedirect(redir, label, callback, subtitleCallback, added)) {
                             found = true
                         }
                     } catch (_: Exception) {
@@ -260,12 +289,13 @@ class ToonWorld4AllProvider : MainAPI() {
             }
         }
 
+        // Fallback any /redirect/
         val redirRe = Regex("href=\"(/redirect/[a-f0-9]+)\"")
         for (m in redirRe.findAll(html)) {
-            val full = archiveUrl + m.groupValues[1]
-            if (!added.add(full)) continue
+            val redir = archiveUrl + m.groupValues[1]
+            if (!added.add(redir)) continue
             try {
-                if (resolveAndExtract(full, "Download", callback, subtitleCallback, added)) {
+                if (openRedirect(redir, "Server", callback, subtitleCallback, added)) {
                     found = true
                 }
             } catch (_: Exception) {
@@ -275,8 +305,70 @@ class ToonWorld4AllProvider : MainAPI() {
         return found
     }
 
-    private fun extractPropsJson(html: String): String? {
-        val marker = "window.__PROPS__"
+    /**
+     * Redirect page has:
+     * window.__PROPS__ = {"link":{"domain":"https://gdflix.dev/file/","hidden":"abc123"},...}
+     * Real URL = domain + hidden
+     */
+    private suspend fun openRedirect(
+        redirectUrl: String,
+        label: String,
+        callback: (ExtractorLink) -> Unit,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        added: HashSet<String>
+    ): Boolean {
+        val body = try {
+            app.get(redirectUrl, headers = hdr("$archiveUrl/")).text
+        } catch (_: Exception) {
+            return false
+        }
+
+        val props = extractJsonObject(body, "window.__PROPS__") ?: return false
+
+        val domain = Regex("\"domain\"\\s*:\\s*\"([^\"]+)\"").find(props)?.groupValues?.get(1)
+        val hidden = Regex("\"hidden\"\\s*:\\s*\"([^\"]+)\"").find(props)?.groupValues?.get(1)
+
+        if (domain.isNullOrBlank() || hidden.isNullOrBlank()) return false
+
+        val finalUrl = domain + hidden
+        if (!added.add(finalUrl)) return false
+
+        // Prefer extractor (HubCloud / GDFlix / Filepress)
+        try {
+            if (loadExtractor(finalUrl, archiveUrl, subtitleCallback, callback)) {
+                return true
+            }
+        } catch (_: Exception) {
+        }
+
+        // Also try without path quirks
+        val alt = finalUrl
+            .replace("hubcloud.cx", "hubcloud.one")
+            .replace("gdflix.dev", "new6.gdflix.dad")
+        if (alt != finalUrl) {
+            try {
+                if (loadExtractor(alt, archiveUrl, subtitleCallback, callback)) {
+                    return true
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        // Last resort: expose as direct link so user can see source exists
+        callback.invoke(
+            ExtractorLink(
+                name,
+                label,
+                finalUrl,
+                archiveUrl,
+                Qualities.Unknown.value,
+                false
+            )
+        )
+        return true
+    }
+
+    private fun extractJsonObject(html: String, marker: String): String? {
         val idx = html.indexOf(marker)
         if (idx < 0) return null
         val start = html.indexOf('{', idx)
@@ -291,79 +383,5 @@ class ToonWorld4AllProvider : MainAPI() {
             }
         }
         return null
-    }
-
-    private suspend fun resolveAndExtract(
-        redirectUrl: String,
-        label: String,
-        callback: (ExtractorLink) -> Unit,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        added: HashSet<String>
-    ): Boolean {
-        val body = try {
-            app.get(redirectUrl, headers = hdr("$archiveUrl/")).text
-        } catch (_: Exception) {
-            return false
-        }
-
-        var ok = false
-        val hostWords = listOf(
-            "filepress", "gdflix", "gdtot", "drive.google", "mega.nz",
-            "hubcloud", "pixeldrain", "workdrive", "nexdrive"
-        )
-        val foundUrls = LinkedHashSet<String>()
-
-        val urlRe = Regex("https?://[^\\s\"'<>]+")
-        for (m in urlRe.findAll(body)) {
-            val u = m.value.trimEnd('"', '\'', ')', ',')
-            val low = u.lowercase()
-            var match = false
-            for (h in hostWords) {
-                if (low.contains(h)) {
-                    match = true
-                    break
-                }
-            }
-            if (match && u.count { it == '/' } >= 3) {
-                foundUrls.add(u)
-            }
-        }
-
-        val hrefRe = Regex("href=\"(https?://[^\"]+)\"")
-        for (m in hrefRe.findAll(body)) {
-            val u = m.groupValues[1]
-            val low = u.lowercase()
-            for (h in hostWords) {
-                if (low.contains(h)) {
-                    foundUrls.add(u)
-                    break
-                }
-            }
-        }
-
-        for (u in foundUrls) {
-            if (!added.add(u)) continue
-            try {
-                if (loadExtractor(u, archiveUrl, subtitleCallback, callback)) {
-                    ok = true
-                    continue
-                }
-            } catch (_: Exception) {
-            }
-            if (u.contains(".m3u8") || u.contains(".mp4")) {
-                callback.invoke(
-                    ExtractorLink(
-                        name,
-                        label,
-                        u,
-                        archiveUrl,
-                        Qualities.Unknown.value,
-                        u.contains(".m3u8")
-                    )
-                )
-                ok = true
-            }
-        }
-        return ok
     }
 }
