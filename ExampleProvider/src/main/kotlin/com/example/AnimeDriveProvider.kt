@@ -4,12 +4,13 @@ package com.example
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class AnimeDriveProvider : MainAPI() {
@@ -21,103 +22,99 @@ class AnimeDriveProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
     private val ua =
-        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
     private val headers = mapOf(
         "User-Agent" to ua,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9,hi;q=0.8",
-        "Referer" to (mainUrl + "/")
+        "Referer" to "$mainUrl/"
     )
 
-    // series/movie category সাইটে প্রায় খালি — কাজ করা ক্যাটাগরি দিয়েছি
     override val mainPage = mainPageOf(
-        (mainUrl + "/") to "Latest",
-        (mainUrl + "/category/hindi-anime-download/") to "Hindi Anime",
-        (mainUrl + "/category/on-going/") to "On Going",
-        (mainUrl + "/category/action/") to "Action",
-        (mainUrl + "/category/school/") to "School",
-        (mainUrl + "/category/romance/") to "Romance",
-        (mainUrl + "/category/shounen/") to "Shounen",
-        (mainUrl + "/category/isekai/") to "Isekai",
-        (mainUrl + "/category/1080p-anime-download/") to "1080p"
+        "$mainUrl/" to "Latest",
+        "$mainUrl/category/hindi-anime-download/" to "Hindi Anime",
+        "$mainUrl/category/on-going/" to "On Going",
+        "$mainUrl/category/action/" to "Action",
+        "$mainUrl/category/school/" to "School",
+        "$mainUrl/category/romance/" to "Romance",
+        "$mainUrl/category/shounen/" to "Shounen",
+        "$mainUrl/category/isekai/" to "Isekai",
+        "$mainUrl/category/1080p-anime-download/" to "1080p"
     )
 
     private fun pageUrl(base: String, page: Int): String {
         if (page <= 1) return base
-        return base.trimEnd('/') + "/page/" + page + "/"
+        return base.trimEnd('/') + "/page/$page/"
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = pageUrl(request.data, page)
         val doc = app.get(url, headers = headers).document
-
-        // শুধু main content — sidebar বাদ
-        val home = doc.select("#content article, main article, .ast-row article, article.ast-article-post, article.post")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
-
+        val home = doc.select(
+            "#content article, main article, .ast-row article, article.ast-article-post, article.post"
+        ).mapNotNull { it.toSearchResult() }.distinctBy { it.url }
         return newHomePageResponse(request.name, home, home.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = URLEncoder.encode(query, "UTF-8")
-        val doc = app.get(mainUrl + "/?s=" + q, headers = headers).document
-        return doc.select("#content article, main article, article.ast-article-post, article.post")
+        val doc = app.get("$mainUrl/?s=$q", headers = headers).document
+        return doc.select("article, .ast-row article, article.post")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val a = this.selectFirst("h2.entry-title a, .entry-title a, h2 a") ?: return null
+        val a = this.selectFirst("h2 a[href], h3 a[href], .entry-title a[href], a[href]") ?: return null
         var href = a.attr("abs:href")
         if (href.isBlank()) href = a.attr("href")
-        if (href.isBlank()) return null
-        // sidebar / tag লিংক বাদ
-        if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/")) return null
+        href = href.substringBefore("#").substringBefore("?").trimEnd('/') + "/"
+        if (!href.contains("animedrive")) return null
+        if (href.contains("/category/") || href.contains("/tag/") || href.contains("/author/")) return null
 
         var title = a.text().trim()
-            .replace(Regex("(?i)\\s*(Hindi|English|Japanese|Tamil|Telugu|Multi Audio|WEB-DL|Episodes?\\s*Download).*$"), "")
-            .trim()
-        if (title.isBlank()) return null
+        if (title.isBlank()) title = a.attr("title").trim()
+        if (title.length < 3) return null
 
-        val img = this.selectFirst("img.wp-post-image, img[src]")
-        var poster = img?.attr("abs:src")
-        if (poster.isNullOrBlank()) poster = img?.attr("src")
-        if (poster.isNullOrBlank()) poster = img?.attr("data-src")
+        var poster: String? = null
+        val img = this.selectFirst("img")
+        if (img != null) {
+            poster = img.attr("abs:src")
+            if (poster.isNullOrBlank()) poster = img.attr("src")
+            if (poster.isNullOrBlank()) poster = img.attr("data-src")
+            if (poster.isNullOrBlank()) poster = img.attr("data-lazy-src")
+        }
 
-        val isMovie = title.contains("Movie", true) || href.contains("movie", true)
-
-        return if (isMovie) {
-            newMovieSearchResponse(title, href, TvType.AnimeMovie) {
-                this.posterUrl = poster
-            }
-        } else {
-            newAnimeSearchResponse(title, href, TvType.Anime) {
-                this.posterUrl = poster
-            }
+        val type = when {
+            title.contains("Movie", true) -> TvType.AnimeMovie
+            else -> TvType.Anime
+        }
+        return newAnimeSearchResponse(title, href, type) {
+            this.posterUrl = poster
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url, headers = headers).document
+        val cleanUrl = url.substringBefore("#").substringBefore("?").trimEnd('/') + "/"
+        val document = app.get(cleanUrl, headers = headers).document
 
-        var title = document.selectFirst("h1.entry-title")?.text()?.trim() ?: "Unknown"
-        title = title.replace(
-            Regex("(?i)\\s*(Hindi|English|Japanese|Tamil|Telugu|Multi Audio|WEB-DL|Episodes?\\s*Download).*$"),
-            ""
-        ).trim()
+        var title = document.selectFirst("h1.entry-title, h1")?.text()?.trim().orEmpty()
+        if (title.isBlank()) {
+            title = document.selectFirst("title")?.text()?.substringBefore("|")?.trim().orEmpty()
+        }
 
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: document.selectFirst("img.wp-post-image")?.attr("abs:src")
+        var poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        if (poster.isNullOrBlank()) {
+            poster = document.selectFirst(".entry-content img, article img, img.wp-post-image")
+                ?.attr("abs:src")
+        }
 
-        val plot = document.select(".entry-content p")
-            .map { it.text().trim() }
-            .firstOrNull { it.length > 60 }
+        val plot = document.selectFirst("meta[property=og:description]")?.attr("content")
+            ?: document.selectFirst(".entry-content p")?.text()
 
-        val year = Regex("(20\\d{2})").find(
-            document.selectFirst(".entry-content")?.text() ?: ""
-        )?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val year = Regex("(20\\d{2}|19\\d{2})")
+            .find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
         val linksPageUrl = document.select("a[href*=link.animedrive.me]")
             .map {
@@ -135,38 +132,44 @@ class AnimeDriveProvider : MainAPI() {
         if (epNames.isNotEmpty()) {
             epNames.forEachIndexed { index, epNameEl ->
                 val epTitle = epNameEl.text().trim()
+                if (epTitle.isBlank()) return@forEachIndexed
                 val epNum = Regex("(\\d+)").find(epTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
                     ?: (index + 1)
 
-                val container = epNameEl.parents().firstOrNull { p ->
-                    p.select("a[href*=/dl/]").isNotEmpty()
-                } ?: epNameEl.parent()
+                // Find nearest parent that has /dl/ buttons
+                var container: Element? = epNameEl.parent()
+                var buttons = emptyList<Element>()
+                var depth = 0
+                while (container != null && depth < 8) {
+                    val btns = container.select("a[href*=/dl/]")
+                    if (btns.isNotEmpty()) {
+                        buttons = btns
+                        break
+                    }
+                    container = container.parent()
+                    depth++
+                }
 
-                val buttons = container?.select("a[href*=/dl/]") ?: emptyList()
                 val sources = ArrayList<Map<String, String>>()
-
                 for (btn in buttons) {
                     var href = btn.attr("abs:href")
                     if (href.isBlank()) href = btn.attr("href")
                     if (href.isBlank() || !href.contains("/dl/")) continue
-
                     val qualityText = btn.text().trim().ifBlank { "Link" }
                     val hoster = when {
-                        btn.hasClass("hc") || qualityText.contains("Hub", true) -> "HubCloud"
-                        btn.hasClass("fp") || qualityText.contains("GD", true) ||
-                                qualityText.contains("Flix", true) -> "GDFlix"
+                        qualityText.contains("Hub", true) || btn.hasClass("hc") -> "HubCloud"
+                        qualityText.contains("GD", true) || qualityText.contains("Flix", true) ||
+                            btn.hasClass("fp") -> "GDFlix"
                         else -> "Server"
                     }
-
                     sources.add(
                         mapOf(
                             "url" to href,
-                            "name" to (hoster + " • " + qualityText),
+                            "name" to "$hoster • $qualityText",
                             "quality" to qualityText
                         )
                     )
                 }
-
                 if (sources.isNotEmpty()) {
                     episodes.add(
                         newEpisode(sources.toJson()) {
@@ -179,43 +182,44 @@ class AnimeDriveProvider : MainAPI() {
             }
         }
 
+        // Fallback: all /dl/ on page as one episode
         if (episodes.isEmpty()) {
-            val allDl = linksDoc.select("a[href*=/dl/]")
-            var i = 0
-            while (i < allDl.size) {
-                val end = minOf(i + 3, allDl.size)
-                val group = allDl.subList(i, end)
-                val sources = ArrayList<Map<String, String>>()
-                for (a in group) {
-                    var href = a.attr("abs:href")
-                    if (href.isBlank()) href = a.attr("href")
-                    if (href.isBlank()) continue
-                    val txt = a.text().trim().ifBlank { "Link" }
-                    sources.add(mapOf("url" to href, "name" to txt, "quality" to txt))
-                }
-                if (sources.isNotEmpty()) {
-                    val ep = (i / 3) + 1
-                    episodes.add(
-                        newEpisode(sources.toJson()) {
-                            this.name = "Episode $ep"
-                            this.episode = ep
-                        }
+            val sources = ArrayList<Map<String, String>>()
+            for (btn in linksDoc.select("a[href*=/dl/]")) {
+                var href = btn.attr("abs:href")
+                if (href.isBlank()) href = btn.attr("href")
+                if (!href.contains("/dl/")) continue
+                val qualityText = btn.text().trim().ifBlank { "Link" }
+                sources.add(
+                    mapOf(
+                        "url" to href,
+                        "name" to qualityText,
+                        "quality" to qualityText
                     )
-                }
-                i += 3
+                )
+            }
+            if (sources.isNotEmpty()) {
+                episodes.add(
+                    newEpisode(sources.toJson()) {
+                        this.name = "Episode 1"
+                        this.episode = 1
+                    }
+                )
             }
         }
 
-        val isMovie = title.contains("Movie", true) || url.contains("movie", true) || episodes.size <= 1
+        if (episodes.isEmpty()) throw ErrorLoadingException("No episodes found")
+
+        val isMovie = title.contains("Movie", true) || cleanUrl.contains("movie", true) || episodes.size <= 1
 
         return if (isMovie) {
-            newMovieLoadResponse(title, url, TvType.AnimeMovie, episodes.firstOrNull()?.data ?: "") {
+            newMovieLoadResponse(title, cleanUrl, TvType.AnimeMovie, episodes.first().data ?: "") {
                 this.posterUrl = poster
                 this.plot = plot
                 this.year = year
             }
         } else {
-            newAnimeLoadResponse(title, url, TvType.Anime) {
+            newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.year = year
@@ -234,11 +238,12 @@ class AnimeDriveProvider : MainAPI() {
 
         val sources: List<Map<String, String>> = try {
             parseJson(data)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             listOf(mapOf("url" to data, "name" to "AnimeDrive", "quality" to ""))
         }
 
         var found = false
+        val added = HashSet<String>()
 
         for (src in sources) {
             val rawUrl = src["url"] ?: continue
@@ -246,141 +251,257 @@ class AnimeDriveProvider : MainAPI() {
             val q = qualityFromText(qualityText)
 
             val realUrl = resolveDlLink(rawUrl) ?: continue
+            val low = realUrl.lowercase()
 
-            // ----- HubCloud -----
-            if (realUrl.contains("hubcloud", true)) {
-                if (extractHubCloud(realUrl, qualityText, q, callback)) {
-                    found = true
-                    continue
+            when {
+                "hubcloud" in low -> {
+                    if (extractHubCloud(realUrl, qualityText, q, callback, added)) found = true
                 }
-            }
-
-            // ----- GDFlix -----
-            if (realUrl.contains("gdflix", true) || realUrl.contains("gdlink", true)) {
-                try {
-                    if (loadExtractor(realUrl, mainUrl, subtitleCallback, callback)) {
+                "gdflix" in low || "gdlink" in low || "gdtot" in low -> {
+                    if (extractGdFlix(realUrl, qualityText, q, callback, subtitleCallback, added)) {
                         found = true
-                        continue
                     }
-                } catch (_: Exception) {
                 }
-                // fallback: still list the page url
-                callback.invoke(
-                    ExtractorLink(name, "GDFlix • $qualityText", realUrl, mainUrl, q, false)
-                )
-                found = true
-                continue
-            }
-
-            // other hosters via built-in extractors
-            try {
-                if (loadExtractor(realUrl, mainUrl, subtitleCallback, callback)) {
-                    found = true
-                    continue
+                "pixeldrain" in low -> {
+                    val id = Regex("""/(?:u|file)/([A-Za-z0-9]+)""").find(realUrl)?.groupValues?.getOrNull(1)
+                    if (id != null) {
+                        val direct = "https://pixeldrain.com/api/file/$id"
+                        if (added.add(direct)) {
+                            callback.invoke(
+                                ExtractorLink(
+                                    name,
+                                    "Pixeldrain • $qualityText",
+                                    direct,
+                                    realUrl,
+                                    q,
+                                    false
+                                )
+                            )
+                            found = true
+                        }
+                    }
                 }
-            } catch (_: Exception) {
+                else -> {
+                    try {
+                        if (loadExtractor(realUrl, mainUrl, subtitleCallback, callback)) found = true
+                    } catch (_: Exception) {
+                    }
+                }
             }
-
-            callback.invoke(
-                ExtractorLink(name, src["name"] ?: "Server", realUrl, mainUrl, q, false)
-            )
-            found = true
         }
         return found
     }
 
-    /** HubCloud: drive page → hubcloud.php → FSL / 10Gbps / Pixeldrain */
+    /**
+     * HubCloud /drive/ID → #download (hubcloud.php) → FSL / 10Gbps / Pixel buttons
+     */
     private suspend fun extractHubCloud(
-        driveUrl: String,
+        url: String,
         qualityText: String,
         quality: Int,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        added: HashSet<String>
     ): Boolean {
-        var found = false
+        var ok = false
         try {
-            val driveDoc = app.get(driveUrl, headers = headers + mapOf("Referer" to mainUrl)).document
-            val phpUrl = driveDoc.select("a[href*=hubcloud.php], a[href*=gamerxyt]")
-                .map { it.attr("abs:href").ifBlank { it.attr("href") } }
-                .firstOrNull { it.contains("hubcloud.php") }
-                ?: Regex("""https?://[^"'\s]+hubcloud\.php[^"'\s]*""")
-                    .find(driveDoc.html())?.value
+            // 1) Open drive/video page
+            val driveDoc = app.get(url, headers = headers).document
+            var gen = driveDoc.select("#download").attr("href")
+            if (gen.isBlank()) {
+                gen = driveDoc.selectFirst("a#download, a[href*=hubcloud.php]")?.attr("href").orEmpty()
+            }
+            if (gen.isBlank()) {
+                // maybe already hubcloud.php
+                gen = url
+            }
+            if (!gen.startsWith("http")) {
+                val base = Regex("https?://[^/]+").find(url)?.value ?: "https://hubcloud.cx"
+                gen = base.trimEnd('/') + "/" + gen.trimStart('/')
+            }
 
-            if (phpUrl.isNullOrBlank()) return false
-
-            val phpDoc = app.get(
-                phpUrl,
-                headers = headers + mapOf("Referer" to driveUrl)
+            // 2) Open generate page (gamerxyt / hubcloud.php)
+            val page = app.get(
+                gen,
+                headers = mapOf(
+                    "User-Agent" to ua,
+                    "Referer" to url,
+                    "Accept" to "text/html,*/*"
+                )
             ).document
 
-            val anchors = phpDoc.select("a[href]")
-            for (a in anchors) {
-                val href = a.attr("abs:href").ifBlank { a.attr("href") }
-                if (href.isBlank()) continue
-                val label = a.text().trim()
+            val size = page.selectFirst("i#size")?.text().orEmpty()
 
-                // skip junk
-                if (href.contains("t.me") || href.contains("telegram", true)) continue
-                if (href.contains("winexch") || href.contains("google.com/search")) continue
-                if (href.contains("hubcloud.cx/drive/admin") || href.contains("tinyurl")) continue
+            for (a in page.select("div.card-body a.btn, div.card-body h2 a, a.btn")) {
+                var link = a.attr("abs:href")
+                if (link.isBlank()) link = a.attr("href")
+                val text = a.text()
+                if (!link.startsWith("http")) continue
+                if (link.contains("t.me") || link.contains("telegram") ||
+                    link.contains("tinyurl") || link.contains("google.com/search")
+                ) continue
+
+                val label = buildString {
+                    append("HubCloud")
+                    if (text.isNotBlank()) append(" • ").append(text.replace("Download", "").trim())
+                    if (qualityText.isNotBlank()) append(" • ").append(qualityText)
+                    if (size.isNotBlank()) append(" • ").append(size)
+                }
 
                 when {
-                    // Direct FSL / R2 CDN file (best)
-                    href.contains("r2.cloudflarestorage.com") ||
-                            href.contains("Download [FSL", true) ||
-                            label.contains("FSL", true) -> {
-                        if (href.startsWith("http") && !href.contains("hubcloud.php")) {
+                    // FSL = signed R2 mp4 — best for playback
+                    text.contains("FSL", true) || link.contains("r2.cloudflarestorage.com") ||
+                        link.contains("cloudflarestorage") -> {
+                        if (added.add(link)) {
                             callback.invoke(
-                                ExtractorLink(
-                                    name,
-                                    "HubCloud FSL • $qualityText",
-                                    href,
-                                    "https://hubcloud.cx/",
-                                    quality,
-                                    false
-                                )
+                                ExtractorLink(name, label, link, gen, quality, false)
                             )
-                            found = true
-                        }
-                    }
-                    // 10Gbps server
-                    label.contains("10Gbps", true) || href.contains("gpdl.hubcloud") -> {
-                        if (href.startsWith("http")) {
-                            callback.invoke(
-                                ExtractorLink(
-                                    name,
-                                    "HubCloud 10Gbps • $qualityText",
-                                    href,
-                                    "https://hubcloud.cx/",
-                                    quality,
-                                    false
-                                )
-                            )
-                            found = true
+                            ok = true
                         }
                     }
                     // Pixeldrain
-                    href.contains("pixeldrain", true) -> {
-                        val fileId = Regex("""/(?:u|file)/([A-Za-z0-9]+)""").find(href)?.groupValues?.getOrNull(1)
-                        val direct = if (fileId != null) {
-                            "https://pixeldrain.com/api/file/$fileId?download"
-                        } else href
-                        callback.invoke(
-                            ExtractorLink(
-                                name,
-                                "Pixeldrain • $qualityText",
-                                direct,
-                                href,
-                                quality,
-                                false
+                    text.contains("Pixel", true) || link.contains("pixeldrain") -> {
+                        val id = Regex("""/(?:u|file)/([A-Za-z0-9]+)""")
+                            .find(link)?.groupValues?.getOrNull(1)
+                        val direct = if (id != null) "https://pixeldrain.com/api/file/$id" else link
+                        if (added.add(direct)) {
+                            callback.invoke(
+                                ExtractorLink(name, label, direct, gen, quality, false)
                             )
-                        )
-                        found = true
+                            ok = true
+                        }
+                    }
+                    // 10Gbps / gpdl — follow redirect to workers
+                    text.contains("10Gbps", true) || text.contains("Server", true) ||
+                        link.contains("gpdl") -> {
+                        try {
+                            val finalUrl = resolveRedirect(link, gen)
+                            if (finalUrl != null && added.add(finalUrl)) {
+                                callback.invoke(
+                                    ExtractorLink(name, label, finalUrl, gen, quality, false)
+                                )
+                                ok = true
+                            } else if (added.add(link)) {
+                                callback.invoke(
+                                    ExtractorLink(name, label, link, gen, quality, false)
+                                )
+                                ok = true
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                    // Other direct-looking links
+                    link.contains(".mp4") || link.contains("workers.dev") ||
+                        link.contains("download") -> {
+                        if (added.add(link)) {
+                            callback.invoke(
+                                ExtractorLink(name, label, link, gen, quality, false)
+                            )
+                            ok = true
+                        }
                     }
                 }
             }
         } catch (_: Exception) {
         }
-        return found
+
+        // Built-in HubCloud extractor as backup
+        if (!ok) {
+            try {
+                if (loadExtractor(url, mainUrl, { }, callback)) ok = true
+            } catch (_: Exception) {
+            }
+        }
+        return ok
+    }
+
+    private suspend fun resolveRedirect(url: String, referer: String): String? {
+        return try {
+            val resp = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to ua,
+                    "Referer" to referer
+                ),
+                allowRedirects = true
+            )
+            val final = resp.url
+            if (final.isNotBlank() && final != url) final else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun extractGdFlix(
+        url: String,
+        qualityText: String,
+        quality: Int,
+        callback: (ExtractorLink) -> Unit,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        added: HashSet<String>
+    ): Boolean {
+        try {
+            if (loadExtractor(url, mainUrl, subtitleCallback, callback)) return true
+        } catch (_: Exception) {
+        }
+
+        val id = url.substringAfterLast("/").substringBefore("?")
+        val mirrors = listOf(
+            url,
+            "https://new6.gdflix.dad/file/$id",
+            "https://gdflix.dad/file/$id"
+        )
+        var ok = false
+        for (pageUrl in mirrors) {
+            try {
+                val doc = app.get(pageUrl, headers = headers).document
+                for (a in doc.select("div.text-center > a, a.btn")) {
+                    val text = a.text()
+                    val href = a.attr("abs:href").ifBlank { a.attr("href") }
+                    if (!href.startsWith("http")) continue
+
+                    if (text.contains("Cloud Download", true) || text.contains("Direct", true)) {
+                        if (added.add(href)) {
+                            callback.invoke(
+                                ExtractorLink(
+                                    name,
+                                    "GDFlix Cloud • $qualityText",
+                                    href,
+                                    pageUrl,
+                                    quality,
+                                    false
+                                )
+                            )
+                            ok = true
+                        }
+                    }
+                    if (text.contains("Instant", true)) {
+                        try {
+                            val loc = app.get(href, headers = headers).url
+                            val real = Regex("[?&]url=([^&]+)").find(loc)?.groupValues?.get(1)
+                                ?.let { URLDecoder.decode(it, "UTF-8") } ?: loc
+                            if (real.startsWith("http") && added.add(real)) {
+                                callback.invoke(
+                                    ExtractorLink(
+                                        name,
+                                        "GDFlix Instant • $qualityText",
+                                        real,
+                                        pageUrl,
+                                        quality,
+                                        false
+                                    )
+                                )
+                                ok = true
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+                if (ok) break
+            } catch (_: Exception) {
+            }
+        }
+        // Never push HTML gdflix /file/ page as video
+        return ok
     }
 
     private fun qualityFromText(text: String): Int {
@@ -393,7 +514,7 @@ class AnimeDriveProvider : MainAPI() {
         }
     }
 
-    /** /dl/BASE64 → real hoster URL (base64 then reverse) */
+    /** /dl/BASE64 → reverse(base64 decode) → real hoster URL */
     private fun resolveDlLink(dlUrl: String): String? {
         return try {
             if (!dlUrl.contains("/dl/")) return dlUrl
