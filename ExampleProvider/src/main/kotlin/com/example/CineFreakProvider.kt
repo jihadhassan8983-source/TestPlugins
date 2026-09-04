@@ -22,17 +22,19 @@ class CineFreakProvider : MainAPI() {
     private val ua =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    private val headers = mapOf(
-        "User-Agent" to ua,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9,bn;q=0.8",
-        "Referer" to "$mainUrl/"
-    )
+    private fun hdr(): Map<String, String> {
+        return mapOf(
+            "User-Agent" to ua,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9,bn;q=0.8",
+            "Referer" to (mainUrl + "/")
+        )
+    }
 
     private fun abs(url: String?, base: String = mainUrl): String? {
         if (url.isNullOrBlank()) return null
         var u = url.trim().replace("&amp;", "&")
-        if (u.startsWith("//")) u = "https:$u"
+        if (u.startsWith("//")) u = "https:" + u
         if (u.startsWith("http")) return u
         return base.trimEnd('/') + "/" + u.trimStart('/')
     }
@@ -52,9 +54,9 @@ class CineFreakProvider : MainAPI() {
     }
 
     private fun yearFrom(text: String): Int? {
-        return Regex("""\((19|20)\d{2}\)""").find(text)?.value
-            ?.trim('(', ')')?.toIntOrNull()
-            ?: Regex("""\b(19|20)\d{2}\b""").find(text)?.value?.toIntOrNull()
+        val a = Regex("""\((19|20)\d{2}\)""").find(text)?.value?.trim('(', ')')?.toIntOrNull()
+        if (a != null) return a
+        return Regex("""\b(19|20)\d{2}\b""").find(text)?.value?.toIntOrNull()
     }
 
     private fun isSeriesTitle(t: String): Boolean {
@@ -168,26 +170,26 @@ class CineFreakProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Latest",
-        "$mainUrl/web-series/" to "WEB-Series",
-        "$mainUrl/hindi-movies/" to "Hindi Movies",
-        "$mainUrl/hindi-dubbed-movies/" to "Hindi Dubbed",
-        "$mainUrl/english-movies/" to "English Movies",
-        "$mainUrl/dual-audio/" to "Dual Audio",
-        "$mainUrl/bangla-movies/" to "Bangla Movies",
-        "$mainUrl/bangla-dubbed/" to "Bangla Dubbed",
-        "$mainUrl/horror/" to "Horror"
+        "https://cinefreak.net/" to "Latest",
+        "https://cinefreak.net/web-series/" to "WEB-Series",
+        "https://cinefreak.net/hindi-movies/" to "Hindi Movies",
+        "https://cinefreak.net/hindi-dubbed-movies/" to "Hindi Dubbed",
+        "https://cinefreak.net/english-movies/" to "English Movies",
+        "https://cinefreak.net/dual-audio/" to "Dual Audio",
+        "https://cinefreak.net/bangla-movies/" to "Bangla Movies",
+        "https://cinefreak.net/bangla-dubbed/" to "Bangla Dubbed",
+        "https://cinefreak.net/horror/" to "Horror"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) {
             request.data
         } else if (request.data.endsWith("/")) {
-            "${request.data}page/$page/"
+            request.data + "page/" + page + "/"
         } else {
-            "$mainUrl/page/$page/"
+            mainUrl + "/page/" + page + "/"
         }
-        val doc = app.get(url, headers = headers).document
+        val doc = app.get(url, headers = hdr()).document
         val list = parseCards(doc)
         return newHomePageResponse(request.name, list, list.isNotEmpty())
     }
@@ -197,10 +199,10 @@ class CineFreakProvider : MainAPI() {
         if (q.isEmpty()) return emptyList()
 
         try {
-            val apiUrl = "\( mainUrl/search-api.php?q= \){q.replace(" ", "+")}&pg=1"
+            val apiUrl = mainUrl + "/search-api.php?q=" + q.replace(" ", "+") + "&pg=1"
             val json = app.get(
                 apiUrl,
-                headers = headers + mapOf(
+                headers = hdr() + mapOf(
                     "Accept" to "application/json,text/plain,*/*",
                     "X-Requested-With" to "XMLHttpRequest"
                 )
@@ -210,7 +212,7 @@ class CineFreakProvider : MainAPI() {
             for (item in parsed.results.orEmpty()) {
                 val slug = item.slug?.trim().orEmpty()
                 if (slug.isEmpty()) continue
-                val href = "$mainUrl/$slug/"
+                val href = mainUrl + "/" + slug + "/"
                 val titleRaw = item.title.orEmpty()
                 val title = cleanTitle(titleRaw)
                 val poster = abs(item.image)
@@ -232,7 +234,7 @@ class CineFreakProvider : MainAPI() {
         } catch (_: Exception) {
         }
 
-        val doc = app.get("\( mainUrl/?s= \){q.replace(" ", "+")}", headers = headers).document
+        val doc = app.get(mainUrl + "/?s=" + q.replace(" ", "+"), headers = hdr()).document
         return parseCards(doc)
     }
 
@@ -377,7 +379,7 @@ class CineFreakProvider : MainAPI() {
         val rating = ratingFloat?.let { (it * 1000).toInt().coerceIn(0, 10000) }
 
         fun namesAfter(label: String): List<String> {
-            val r = Regex("""(?i)$label\s*:\s*([^\n<]+)""")
+            val r = Regex("""(?i)""" + label + """\s*:\s*([^\n<]+)""")
             val raw = r.find(text)?.groupValues?.getOrNull(1) ?: return emptyList()
             return raw.split(",", "|", "&")
                 .map { it.trim() }
@@ -394,7 +396,7 @@ class CineFreakProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = headers).document
+        val doc = app.get(url, headers = hdr()).document
         val titleRaw = doc.selectFirst("h1, title")?.text() ?: "Unknown"
         val title = cleanTitle(titleRaw)
         val poster = extractPoster(doc)
@@ -429,7 +431,7 @@ class CineFreakProvider : MainAPI() {
                 boxes.forEachIndexed { idx, box ->
                     if (box.select("a[href*='generate.php?id=']").isEmpty()) return@forEachIndexed
                     episodes += newEpisode(url) {
-                        this.name = "Episode ${idx + 1}"
+                        this.name = "Episode " + (idx + 1)
                         this.episode = idx + 1
                         this.data = url
                     }
@@ -473,7 +475,7 @@ class CineFreakProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val pageUrl = data.substringBefore("|||").ifBlank { data }
-        val doc = app.get(pageUrl, headers = headers).document
+        val doc = app.get(pageUrl, headers = hdr()).document
         val servers = decodeWatchLinks(doc)
 
         val preferred = servers.filter {
@@ -485,11 +487,13 @@ class CineFreakProvider : MainAPI() {
         val pending = ArrayList<Triple<String, String, Int>>()
         val pushed = HashSet<String>()
 
-        limited.apmap { (cineUrl, label) ->
+        limited.apmap { pair ->
+            val cineUrl = pair.first
+            val label = pair.second
             try {
                 val page = app.get(
                     cineUrl,
-                    headers = headers + mapOf("Referer" to "$mainUrl/")
+                    headers = hdr() + mapOf("Referer" to (mainUrl + "/"))
                 ).text
                 for (m in extractMediaUrls(page)) {
                     val u = m.trim().replace("&amp;", "&")
@@ -525,16 +529,15 @@ class CineFreakProvider : MainAPI() {
         )
 
         var found = false
-        for ((u, label, q) in sorted) {
+        for (item in sorted) {
+            val u = item.first
+            val label = item.second
+            val q = item.third
             val isM3u8 = u.contains(".m3u8")
-            val nameLabel = buildString {
-                append(label.ifBlank { "CineFreak" })
-                when (q) {
-                    Qualities.P1080.value -> if (!label.contains("1080")) append(" • 1080p")
-                    Qualities.P720.value -> if (!label.contains("720")) append(" • 720p")
-                    Qualities.P480.value -> if (!label.contains("480")) append(" • 480p")
-                }
-            }
+            var nameLabel = label.ifBlank { "CineFreak" }
+            if (q == Qualities.P1080.value && !label.contains("1080")) nameLabel += " • 1080p"
+            if (q == Qualities.P720.value && !label.contains("720")) nameLabel += " • 720p"
+            if (q == Qualities.P480.value && !label.contains("480")) nameLabel += " • 480p"
             callback(
                 ExtractorLink(
                     name,
