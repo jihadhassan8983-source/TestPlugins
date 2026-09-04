@@ -6,7 +6,6 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -21,16 +20,12 @@ class CineFreakProvider : MainAPI() {
     private val ua =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    private fun hdr(referer: String = mainUrl): Map<String, String> = mapOf(
+    private val headers = mapOf(
         "User-Agent" to ua,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9",
-        "Referer" to referer
+        "Referer" to "$mainUrl/"
     )
-
-    private fun get(url: String, referer: String = mainUrl): String {
-        return app.get(url, headers = hdr(referer), timeout = 30).text
-    }
 
     private fun abs(url: String?, base: String = mainUrl): String? {
         if (url.isNullOrBlank()) return null
@@ -132,18 +127,17 @@ class CineFreakProvider : MainAPI() {
         } else {
             "$mainUrl/page/$page/"
         }
-        val doc = Jsoup.parse(get(url))
+        val doc = app.get(url, headers = headers).document
         val list = parseCards(doc)
-        return newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
+        return newHomePageResponse(request.name, list, list.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = query.trim().replace(" ", "+")
-        val doc = Jsoup.parse(get("$mainUrl/?s=$q"))
+        val doc = app.get("$mainUrl/?s=$q", headers = headers).document
         return parseCards(doc)
     }
 
-    /** generate.php?id=BASE64 → cinecloud URL (+ truncated hash variant) */
     private fun decodeGenerateLinks(doc: Document): List<Pair<String, String>> {
         val out = LinkedHashMap<String, String>()
         for (a in doc.select("a[href*='generate.php?id=']")) {
@@ -176,7 +170,6 @@ class CineFreakProvider : MainAPI() {
         return out.map { it.key to it.value }
     }
 
-    /** CineCloud HTML → direct R2 / mp4 / mkv / m3u8 */
     private fun extractMediaUrls(html: String): List<String> {
         val found = LinkedHashSet<String>()
 
@@ -211,7 +204,7 @@ class CineFreakProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = Jsoup.parse(get(url))
+        val doc = app.get(url, headers = headers).document
         val titleRaw = doc.selectFirst("h1.entry-title, h1, title")?.text() ?: "Unknown"
         val title = cleanTitle(titleRaw)
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
@@ -266,8 +259,9 @@ class CineFreakProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val pageUrl = data.substringBefore("|||").ifBlank { data }
-        val html = get(pageUrl)
-        val doc = Jsoup.parse(html)
+        val resp = app.get(pageUrl, headers = headers)
+        val doc = resp.document
+        val html = resp.text
         val servers = decodeGenerateLinks(doc)
 
         var found = false
@@ -278,15 +272,15 @@ class CineFreakProvider : MainAPI() {
             if (!u.startsWith("http")) return
             if (!pushed.add(u)) return
             val q = qualityFrom(label + " " + u)
-            val isM3u8 = u.contains(".m3u8", ignoreCase = true)
+            val isM3u8 = u.contains(".m3u8")
             callback(
                 ExtractorLink(
-                    source = name,
-                    name = label.take(60).ifBlank { name },
-                    url = u,
-                    referer = "https://new5.cinecloud.site/",
-                    quality = q,
-                    isM3u8 = isM3u8
+                    name,
+                    label.take(60).ifBlank { name },
+                    u,
+                    "https://new5.cinecloud.site/",
+                    q,
+                    isM3u8
                 )
             )
             found = true
@@ -296,7 +290,10 @@ class CineFreakProvider : MainAPI() {
 
         for ((cineUrl, label) in ordered) {
             try {
-                val page = get(cineUrl, referer = mainUrl)
+                val page = app.get(
+                    cineUrl,
+                    headers = headers + mapOf("Referer" to "$mainUrl/")
+                ).text
                 for (m in extractMediaUrls(page)) {
                     push(m, label.ifBlank { "CineCloud" })
                 }
