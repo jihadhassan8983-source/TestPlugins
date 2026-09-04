@@ -340,7 +340,7 @@ class MovieLinkBDProvider : MainAPI() {
             u = absUrl(u, base) ?: return
             if (!u.startsWith("http")) return
             if (u.contains("facebook") || u.contains("telegram") || u.contains("whatsapp")) return
-            if (u.contains("/type/") || u.contains("/search?")).return
+            if (u.contains("/type/") || u.contains("/search?")) return
             val prev = out[u]
             if (prev == null || (prev == "Server" && label != "Server")) {
                 out[u] = label.ifBlank { "Server" }.take(80)
