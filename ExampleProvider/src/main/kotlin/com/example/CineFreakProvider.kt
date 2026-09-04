@@ -29,9 +29,10 @@ class CineFreakProvider : MainAPI() {
 
     private fun abs(url: String?, base: String = mainUrl): String? {
         if (url.isNullOrBlank()) return null
-        if (url.startsWith("http")) return url
-        if (url.startsWith("//")) return "https:$url"
-        return base.trimEnd('/') + "/" + url.trimStart('/')
+        var u = url.trim().replace("&amp;", "&")
+        if (u.startsWith("//")) u = "https:$u"
+        if (u.startsWith("http")) return u
+        return base.trimEnd('/') + "/" + u.trimStart('/')
     }
 
     private fun cleanTitle(raw: String): String {
@@ -67,32 +68,40 @@ class CineFreakProvider : MainAPI() {
     }
 
     private fun pickImg(el: Element): String? {
-        val img = el.selectFirst("img") ?: return null
-        val candidates = listOf(
-            img.attr("src"),
-            img.attr("data-src"),
-            img.attr("data-lazy-src"),
-            img.attr("data-original")
-        )
-        return candidates.mapNotNull { abs(it) }
-            .firstOrNull { it.contains("http") && !it.contains("data:image") }
+        for (img in el.select("img")) {
+            val candidates = listOf(
+                img.attr("src"),
+                img.attr("data-src"),
+                img.attr("data-lazy-src"),
+                img.attr("data-original"),
+                img.attr("data-srcset").substringBefore(" ")
+            )
+            val url = candidates.mapNotNull { abs(it) }
+                .firstOrNull {
+                    it.contains("http") &&
+                        !it.contains("data:image") &&
+                        !it.endsWith(".svg") &&
+                        !it.contains("logo")
+                }
+            if (url != null) return url
+        }
+        // style background-image
+        val style = el.attr("style") + el.select("[style]").joinToString("") { it.attr("style") }
+        val bg = Regex("""url\(['"]?([^'")]+)['"]?\)""").find(style)?.groupValues?.getOrNull(1)
+        return abs(bg)
     }
 
     private fun parseCards(doc: Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
-        for (a in doc.select("a.movie-card[href], a[href*='-download/']")) {
-            val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
-            if (!href.contains("cinefreak.net")) continue
-            if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/")) continue
-            if (!href.contains("-download") && !href.matches(Regex("""https?://[^/]+/[^/]+/$"""))) continue
-            if (!seen.add(href)) continue
 
-            val titleRaw = a.selectFirst("h3.movie-card-title, h2, h3")?.text()
-                ?: a.attr("aria-label").ifBlank { a.text() }
-            if (titleRaw.isBlank()) continue
+        fun add(href: String, titleRaw: String, poster: String?) {
+            if (!href.contains("cinefreak.net")) return
+            if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/")) return
+            if (!href.contains("-download")) return
+            if (!seen.add(href)) return
+            if (titleRaw.isBlank()) return
             val title = cleanTitle(titleRaw)
-            val poster = pickImg(a)
             val series = isSeriesTitle(titleRaw)
             out += if (series) {
                 newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
@@ -104,6 +113,27 @@ class CineFreakProvider : MainAPI() {
                 }
             }
         }
+
+        // 1) Normal movie cards (have posters)
+        for (a in doc.select("a.movie-card[href]")) {
+            val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
+            val titleRaw = a.selectFirst("h3.movie-card-title, h2, h3")?.text()
+                ?: a.attr("aria-label").ifBlank { a.text() }
+            add(href, titleRaw, pickImg(a))
+        }
+
+        // 2) Hero slider slides (img is sibling, not inside the title <a>)
+        for (slide in doc.select(".cine-slide, .swiper-slide")) {
+            val link = slide.selectFirst("h2.cine-slide-title a[href], a[href*='-download/']")
+                ?: continue
+            val href = abs(link.attr("abs:href").ifBlank { link.attr("href") }) ?: continue
+            val titleRaw = link.text().ifBlank {
+                slide.selectFirst("img")?.attr("alt") ?: ""
+            }
+            val poster = pickImg(slide)
+            add(href, titleRaw, poster)
+        }
+
         return out
     }
 
@@ -134,8 +164,14 @@ class CineFreakProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = query.trim().replace(" ", "+")
-        val doc = app.get("$mainUrl/?s=$q", headers = headers).document
-        return parseCards(doc)
+        // site uses both ?s= and fast-search/?q=
+        var doc = app.get("$mainUrl/?s=$q", headers = headers).document
+        var list = parseCards(doc)
+        if (list.isEmpty()) {
+            doc = app.get("$mainUrl/fast-search/?q=$q", headers = headers).document
+            list = parseCards(doc)
+        }
+        return list
     }
 
     private fun decodeGenerateLinks(doc: Document): List<Pair<String, String>> {
@@ -151,19 +187,26 @@ class CineFreakProvider : MainAPI() {
             }
             if (!decoded.startsWith("http")) continue
 
-            val label = a.text().trim().ifBlank {
-                a.parent()?.text()?.trim()?.take(40) ?: "Server"
+            // Label from nearby text (quality)
+            val nearby = (a.text() + " " + (a.parent()?.text() ?: "")).trim()
+            val label = when {
+                nearby.contains("1080", true) -> "1080p"
+                nearby.contains("720", true) -> "720p"
+                nearby.contains("480", true) -> "480p"
+                nearby.contains("2160", true) || nearby.contains("4K", true) -> "4K"
+                else -> a.text().trim().ifBlank { "Watch" }
             }
+
             val preferWatch = decoded.contains("/x/")
             if (!out.containsKey(decoded) || preferWatch) {
-                out[decoded] = label.ifBlank { if (preferWatch) "Watch" else "Download" }
+                out[decoded] = label
             }
 
             val trunc = Regex("""(https?://[^/]+/(?:x|f)/)([a-fA-F0-9]+)""").find(decoded)
             if (trunc != null) {
                 val shortUrl = trunc.groupValues[1] + trunc.groupValues[2]
                 if (!out.containsKey(shortUrl)) {
-                    out[shortUrl] = label.ifBlank { "Watch" }
+                    out[shortUrl] = label
                 }
             }
         }
@@ -207,8 +250,8 @@ class CineFreakProvider : MainAPI() {
         val doc = app.get(url, headers = headers).document
         val titleRaw = doc.selectFirst("h1.entry-title, h1, title")?.text() ?: "Unknown"
         val title = cleanTitle(titleRaw)
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: pickImg(doc.body())
+        val poster = abs(doc.selectFirst("meta[property=og:image]")?.attr("content"))
+            ?: pickImg(doc.selectFirst(".entry-content, article, body") ?: doc.body())
         val plot = doc.selectFirst(".entry-content p, .post-content p, article p")?.text()
         val year = Regex("""\((19|20)\d{2}\)""").find(titleRaw)?.value
             ?.trim('(', ')')?.toIntOrNull()
@@ -266,26 +309,17 @@ class CineFreakProvider : MainAPI() {
 
         var found = false
         val pushed = HashSet<String>()
+        val pending = ArrayList<Triple<String, String, Int>>() // url, label, quality
 
-        fun push(mediaUrl: String, label: String) {
+        fun collect(mediaUrl: String, label: String) {
             val u = mediaUrl.trim().replace("&amp;", "&")
             if (!u.startsWith("http")) return
             if (!pushed.add(u)) return
             val q = qualityFrom(label + " " + u)
-            val isM3u8 = u.contains(".m3u8")
-            callback(
-                ExtractorLink(
-                    name,
-                    label.take(60).ifBlank { name },
-                    u,
-                    "https://new5.cinecloud.site/",
-                    q,
-                    isM3u8
-                )
-            )
-            found = true
+            pending.add(Triple(u, label, q))
         }
 
+        // Prefer /x/ watch pages
         val ordered = servers.sortedByDescending { it.first.contains("/x/") }
 
         for ((cineUrl, label) in ordered) {
@@ -295,14 +329,60 @@ class CineFreakProvider : MainAPI() {
                     headers = headers + mapOf("Referer" to "$mainUrl/")
                 ).text
                 for (m in extractMediaUrls(page)) {
-                    push(m, label.ifBlank { "CineCloud" })
+                    collect(m, label.ifBlank { "CineCloud" })
                 }
             } catch (_: Exception) {
             }
         }
 
         for (m in extractMediaUrls(html)) {
-            push(m, "Direct")
+            collect(m, "Direct")
+        }
+
+        // Sort: prefer 720p, then 480p, then 1080p (many phones fail on 1080 MKV)
+        // Also prefer .mp4 over .mkv when same quality
+        val sorted = pending.sortedWith(
+            compareBy<Triple<String, String, Int>> {
+                when (it.third) {
+                    Qualities.P720.value -> 0
+                    Qualities.P480.value -> 1
+                    Qualities.P360.value -> 2
+                    Qualities.P1080.value -> 3
+                    else -> 4
+                }
+            }.thenBy {
+                when {
+                    it.first.contains(".mp4", true) -> 0
+                    it.first.contains(".m3u8", true) -> 1
+                    it.first.contains(".mkv", true) -> 2
+                    else -> 3
+                }
+            }
+        )
+
+        for ((u, label, q) in sorted) {
+            val isM3u8 = u.contains(".m3u8")
+            val nameLabel = buildString {
+                append(label.take(40).ifBlank { "CineFreak" })
+                when (q) {
+                    Qualities.P1080.value -> append(" • 1080p")
+                    Qualities.P720.value -> append(" • 720p")
+                    Qualities.P480.value -> append(" • 480p")
+                }
+                if (u.contains(".mkv", true)) append(" • MKV")
+                if (u.contains(".mp4", true)) append(" • MP4")
+            }
+            callback(
+                ExtractorLink(
+                    name,
+                    nameLabel,
+                    u,
+                    "https://new5.cinecloud.site/",
+                    q,
+                    isM3u8
+                )
+            )
+            found = true
         }
 
         return found
