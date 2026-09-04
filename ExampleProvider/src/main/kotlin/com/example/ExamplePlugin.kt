@@ -11,6 +11,5 @@ class ExamplePlugin : BasePlugin() {
         registerMainAPI(AnimeDriveProvider())
         registerMainAPI(AnimeKaiProvider())
         registerMainAPI(CineFreakProvider())
-        // MovieLinkBD বাদ — ডিলিট করেছ
     }
 }
