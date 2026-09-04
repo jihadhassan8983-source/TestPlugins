@@ -1,12 +1,14 @@
+@file:Suppress("DEPRECATION_ERROR", "DEPRECATION")
+
 package com.example
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.util.Base64
 
 class CineFreakProvider : MainAPI() {
     override var mainUrl = "https://cinefreak.net"
@@ -45,7 +47,9 @@ class CineFreakProvider : MainAPI() {
             .replace(Regex("""(?i)\s*(WEB-DL|BluRay|HEVC|ESub|GDrive|480p|720p|1080p|2160p|4K).*$"""), "")
             .replace(Regex("""\s{2,}"""), " ")
             .trim()
-        if (t.length < 3) t = raw.substringBefore("Download").substringBefore("Watch").trim()
+        if (t.length < 3) {
+            t = raw.substringBefore("Download").substringBefore("Watch").trim()
+        }
         return t.ifBlank { raw.trim() }
     }
 
@@ -121,12 +125,16 @@ class CineFreakProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) request.data else {
-            if (request.data.endsWith("/")) "${request.data}page/$page/"
-            else "$mainUrl/page/$page/"
+        val url = if (page <= 1) {
+            request.data
+        } else if (request.data.endsWith("/")) {
+            "${request.data}page/$page/"
+        } else {
+            "$mainUrl/page/$page/"
         }
         val doc = Jsoup.parse(get(url))
-        return newHomePageResponse(request.name, parseCards(doc), hasNext = parseCards(doc).isNotEmpty())
+        val list = parseCards(doc)
+        return newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -135,28 +143,28 @@ class CineFreakProvider : MainAPI() {
         return parseCards(doc)
     }
 
-    /** Decode generate.php?id=BASE64 → cinecloud URL variants */
+    /** generate.php?id=BASE64 → cinecloud URL (+ truncated hash variant) */
     private fun decodeGenerateLinks(doc: Document): List<Pair<String, String>> {
         val out = LinkedHashMap<String, String>()
         for (a in doc.select("a[href*='generate.php?id=']")) {
             val href = a.attr("abs:href").ifBlank { a.attr("href") }
-            val id = Regex("""[?&]id=([A-Za-z0-9+/=]+)""").find(href)?.groupValues?.getOrNull(1) ?: continue
+            val id = Regex("""[?&]id=([A-Za-z0-9+/=]+)""").find(href)?.groupValues?.getOrNull(1)
+                ?: continue
             val decoded = try {
-                String(Base64.getDecoder().decode(id))
+                String(Base64.decode(id, Base64.DEFAULT))
             } catch (_: Exception) {
                 continue
             }
             if (!decoded.startsWith("http")) continue
+
             val label = a.text().trim().ifBlank {
                 a.parent()?.text()?.trim()?.take(40) ?: "Server"
             }
-            // Prefer watch (/x/) over file (/f/)
             val preferWatch = decoded.contains("/x/")
-            val key = decoded
-            if (!out.containsKey(key) || preferWatch) {
-                out[key] = label.ifBlank { if (preferWatch) "Watch" else "Download" }
+            if (!out.containsKey(decoded) || preferWatch) {
+                out[decoded] = label.ifBlank { if (preferWatch) "Watch" else "Download" }
             }
-            // Truncated hash variant (works on cinecloud)
+
             val trunc = Regex("""(https?://[^/]+/(?:x|f)/)([a-fA-F0-9]+)""").find(decoded)
             if (trunc != null) {
                 val shortUrl = trunc.groupValues[1] + trunc.groupValues[2]
@@ -168,12 +176,13 @@ class CineFreakProvider : MainAPI() {
         return out.map { it.key to it.value }
     }
 
-    /** From cinecloud page HTML extract direct R2 / media URLs */
+    /** CineCloud HTML → direct R2 / mp4 / mkv / m3u8 */
     private fun extractMediaUrls(html: String): List<String> {
         val found = LinkedHashSet<String>()
-        // yagaverse embed: ?id=URL_ENCODED
+
         Regex("""player\.yagaverse\.net/embed2/\?id=([^"'&\s]+)""", RegexOption.IGNORE_CASE)
-            .findAll(html).forEach { m ->
+            .findAll(html)
+            .forEach { m ->
                 var u = m.groupValues[1]
                 repeat(3) {
                     try {
@@ -183,15 +192,21 @@ class CineFreakProvider : MainAPI() {
                 }
                 if (u.startsWith("http")) found.add(u)
             }
-        // direct r2 / mp4 / mkv / m3u8
+
         Regex(
             """https?://[^\s"'<>\\]+(?:r2\.dev|workers\.dev)[^\s"'<>\\]*""",
             RegexOption.IGNORE_CASE
-        ).findAll(html).forEach { found.add(it.value.replace("&amp;", "&")) }
+        ).findAll(html).forEach {
+            found.add(it.value.replace("&amp;", "&"))
+        }
+
         Regex(
             """https?://[^\s"'<>\\]+\.(?:mp4|mkv|m3u8)[^\s"'<>\\]*""",
             RegexOption.IGNORE_CASE
-        ).findAll(html).forEach { found.add(it.value.replace("&amp;", "&")) }
+        ).findAll(html).forEach {
+            found.add(it.value.replace("&amp;", "&"))
+        }
+
         return found.toList()
     }
 
@@ -205,12 +220,9 @@ class CineFreakProvider : MainAPI() {
         val year = Regex("""\((19|20)\d{2}\)""").find(titleRaw)?.value
             ?.trim('(', ')')?.toIntOrNull()
 
-        val links = decodeGenerateLinks(doc)
-        // Store page url; loadLinks will re-parse (fresh)
         val series = isSeriesTitle(titleRaw)
 
         if (series) {
-            // Build episodes from single-dl boxes if present
             val episodes = ArrayList<Episode>()
             val boxes = doc.select("[id^=single-dl]")
             if (boxes.isNotEmpty()) {
@@ -222,7 +234,7 @@ class CineFreakProvider : MainAPI() {
                     episodes += newEpisode(url) {
                         this.name = epName
                         this.episode = idx + 1
-                        this.data = url // same page; loadLinks collects all / user picks quality
+                        this.data = url
                     }
                 }
             }
@@ -266,7 +278,7 @@ class CineFreakProvider : MainAPI() {
             if (!u.startsWith("http")) return
             if (!pushed.add(u)) return
             val q = qualityFrom(label + " " + u)
-            val isM3u8 = u.contains(".m3u8", true)
+            val isM3u8 = u.contains(".m3u8", ignoreCase = true)
             callback(
                 ExtractorLink(
                     source = name,
@@ -280,21 +292,18 @@ class CineFreakProvider : MainAPI() {
             found = true
         }
 
-        // Prefer /x/ watch links first
         val ordered = servers.sortedByDescending { it.first.contains("/x/") }
 
         for ((cineUrl, label) in ordered) {
             try {
                 val page = get(cineUrl, referer = mainUrl)
-                val medias = extractMediaUrls(page)
-                for (m in medias) {
+                for (m in extractMediaUrls(page)) {
                     push(m, label.ifBlank { "CineCloud" })
                 }
             } catch (_: Exception) {
             }
         }
 
-        // Fallback: any r2/mp4 already on post page
         for (m in extractMediaUrls(html)) {
             push(m, "Direct")
         }
