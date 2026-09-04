@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://ultramoviedrive.com/favicon.ico",
-        "fileHash": "sha256-ebccdbd4bb26f23799c38cd59a88f4eaebe076549317d5e5d73a6b48f14feeeb",
+        "fileHash": "sha256-f3135197b47901daa33bb1f34382c9d280d24b59744466709daa48b2f5550dc1",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/jihadhassan8983-source/TestPlugins",
-        "fileSize": 127556,
+        "fileSize": 127486,
         "status": 1,
         "language": "hi",
         "authors": [
