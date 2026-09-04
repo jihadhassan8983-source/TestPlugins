@@ -18,7 +18,7 @@ class KDHindiDubbedProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     private val ua =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
     private fun hdr(referer: String = mainUrl + "/"): Map<String, String> {
         return mapOf(
@@ -74,18 +74,15 @@ class KDHindiDubbedProvider : MainAPI() {
     private fun parseCards(doc: Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
-
         for (a in doc.select("h2.entry-title a[href], h1.entry-title a[href], .entry-title a[href]")) {
             val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
-            if (!href.contains(mainUrl.replace("https://", ""))) continue
+            if (!href.contains("kdhindidubbed")) continue
             if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/")) continue
             if (!seen.add(href)) continue
             val titleRaw = a.text().trim()
             if (titleRaw.isBlank()) continue
             val title = cleanTitle(titleRaw)
-            val parent = a.parents().firstOrNull {
-                it.selectFirst("img") != null
-            } ?: a.parent()
+            val parent = a.parents().firstOrNull { it.selectFirst("img") != null } ?: a.parent()
             val poster = parent?.let { pickImg(it) }
             val year = yearFrom(titleRaw)
             if (isMovieTitle(titleRaw)) {
@@ -136,21 +133,16 @@ class KDHindiDubbedProvider : MainAPI() {
         return parseCards(doc)
     }
 
-    /** Find intermediate DOWNLOAD LINKS pages (720p / 1080p etc.) */
     private fun findDownloadPages(doc: Document): List<Pair<String, String>> {
         val out = ArrayList<Pair<String, String>>()
         for (a in doc.select("a[href]")) {
             val text = a.text().trim().lowercase()
             val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
-            if (!href.contains(mainUrl.replace("https://", ""))) continue
-            if (text.contains("download link") || text == "download links" ||
-                (text.contains("download") && !text.contains("how to"))
-            ) {
-                val label = a.text().trim().ifBlank { "Download" }
-                out.add(label to href)
+            if (!href.contains("kdhindidubbed")) continue
+            if (text.contains("download link") || text == "download links") {
+                out.add(a.text().trim().ifBlank { "Download" } to href)
             }
         }
-        // fallback: short random-path links near download text
         if (out.isEmpty()) {
             for (a in doc.select(".entry-content a[href], article a[href]")) {
                 val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
@@ -164,10 +156,6 @@ class KDHindiDubbedProvider : MainAPI() {
         return out.distinctBy { it.second }
     }
 
-    /**
-     * Parse episode blocks: Episode – 01 + MomoFile / XCloud / Stream links
-     * Returns list of (episodeNumber, list of (label, url))
-     */
     private fun parseEpisodeServers(doc: Document): List<Pair<Int, List<Pair<String, String>>>> {
         val html = doc.html()
             .replace("&#8211;", "–")
@@ -190,18 +178,20 @@ class KDHindiDubbedProvider : MainAPI() {
             for (lm in linkRegex.findAll(block)) {
                 val url = lm.groupValues[1].trim()
                 val label = lm.groupValues[2].replace(Regex("""<[^>]+>"""), "").trim()
-                if (url.contains("momofile", true) ||
-                    url.contains("xcloud", true) ||
-                    url.contains("hgcloud", true) ||
-                    url.contains("chuckle", true) ||
-                    url.contains("fpgo", true)
+                val host = url.lowercase()
+                if (host.contains("momofile") ||
+                    host.contains("xcloud") ||
+                    host.contains("gkyfilehost") ||
+                    host.contains("fpgo") ||
+                    host.contains("p2pstream") ||
+                    host.contains("rpmplay") ||
+                    host.contains("chuckle") ||
+                    host.contains("hgcloud")
                 ) {
                     servers.add((label.ifBlank { "Server" }) to url)
                 }
             }
-            if (servers.isNotEmpty()) {
-                out.add(ep to servers)
-            }
+            if (servers.isNotEmpty()) out.add(ep to servers)
         }
         return out
     }
@@ -214,7 +204,6 @@ class KDHindiDubbedProvider : MainAPI() {
             ?: pickImg(doc.body())
         val year = yearFrom(titleRaw)
 
-        // plot / meta from content
         val content = doc.selectFirst(".entry-content, article")
         var plot: String? = null
         val tags = ArrayList<String>()
@@ -223,11 +212,11 @@ class KDHindiDubbedProvider : MainAPI() {
             for (line in text.split('\n', '.')) {
                 val l = line.trim()
                 if (l.startsWith("Genres:", true)) {
-                    tags += l.substringAfter(":").split(",", "/").map { it.trim() }.filter { it.length in 2..30 }
+                    tags += l.substringAfter(":").split(",", "/")
+                        .map { it.trim() }.filter { it.length in 2..30 }
                 }
             }
-            val paras = content.select("p, div.separator span")
-            for (p in paras) {
+            for (p in content.select("p, div.separator span")) {
                 val t = p.text().trim()
                 if (t.length > 80 && !t.contains("Download", true) && !t.contains("Episode", true)) {
                     plot = t
@@ -239,19 +228,13 @@ class KDHindiDubbedProvider : MainAPI() {
         val downloadPages = findDownloadPages(doc)
         val episodes = ArrayList<Episode>()
         val seenEp = HashSet<Int>()
-
-        // Prefer first download page for episode list (usually 720p pack)
         val pagesToScan = if (downloadPages.isNotEmpty()) downloadPages else listOf("Main" to url)
-        for ((pageLabel, pageUrl) in pagesToScan.take(2)) {
+
+        for ((_, pageUrl) in pagesToScan.take(2)) {
             try {
                 val pdoc = app.get(pageUrl, headers = hdr(url)).document
-                val parsed = parseEpisodeServers(pdoc)
-                for ((epNum, servers) in parsed) {
+                for ((epNum, servers) in parseEpisodeServers(pdoc)) {
                     if (!seenEp.add(epNum)) continue
-                    // Prefer MomoFile link for data
-                    val momo = servers.firstOrNull { it.second.contains("momofile", true) }
-                    val primary = momo ?: servers.firstOrNull() ?: continue
-                    // Store all servers as data payload
                     val payload = servers.joinToString("||") { it.first + "::" + it.second }
                     episodes += newEpisode(payload) {
                         this.name = "Episode " + epNum
@@ -264,7 +247,6 @@ class KDHindiDubbedProvider : MainAPI() {
         }
 
         if (episodes.isEmpty() && isMovieTitle(titleRaw)) {
-            // movie: try same download pages as single episode
             for ((_, pageUrl) in downloadPages.take(1)) {
                 try {
                     val pdoc = app.get(pageUrl, headers = hdr(url)).document
@@ -272,7 +254,8 @@ class KDHindiDubbedProvider : MainAPI() {
                     for (a in pdoc.select(".entry-content a[href]")) {
                         val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
                         val label = a.text().trim().ifBlank { "Server" }
-                        if (href.contains("momofile") || href.contains("xcloud") || href.contains("hgcloud")) {
+                        val h = href.lowercase()
+                        if (h.contains("momofile") || h.contains("gkyfilehost") || h.contains("xcloud")) {
                             servers.add(label to href)
                         }
                     }
@@ -299,7 +282,6 @@ class KDHindiDubbedProvider : MainAPI() {
         }
 
         episodes.sortBy { it.episode }
-
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = plot
@@ -308,17 +290,38 @@ class KDHindiDubbedProvider : MainAPI() {
         }
     }
 
-    /** Resolve MomoFile page → direct mkv URL */
-    private suspend fun resolveMomo(momoUrl: String): String? {
+    /** GKYFILEHOST → generate.php → r2cloud page → direct R2 MKV (supports Range/HEAD) */
+    private suspend fun resolveGky(fileUrl: String): String? {
         return try {
-            val doc = app.get(momoUrl, headers = hdr(mainUrl + "/")).document
-            val a = doc.selectFirst("a[href*=download.php]")
-            val href = a?.attr("abs:href")?.ifBlank { a.attr("href") }
-                ?: Regex("""download\.php\?t=[^"'\s]+""").find(doc.html())?.value?.let {
-                    "https://momofile.shop/" + it
-                }
-            val full = abs(href) ?: return null
-            if (full.contains("download.php")) full else null
+            val id = Regex("""/file/(\d+)""").find(fileUrl)?.groupValues?.getOrNull(1)
+                ?: return null
+            val base = Regex("""(https?://[^/]+)""").find(fileUrl)?.groupValues?.getOrNull(1)
+                ?: "https://new1.gkyfilehost.lol"
+            val genUrl = base + "/generate.php?id=" + id
+            val genDoc = app.get(genUrl, headers = hdr(fileUrl))
+            val genHtml = genDoc.text
+            val r2path = Regex("""delayedDownload\([^,]+,\s*'(/(?:r2cloud)/[^']+)'""")
+                .find(genHtml)?.groupValues?.getOrNull(1)
+                ?: Regex("""['"](/r2cloud/\d+/[^'"]+)['"]""").find(genHtml)?.groupValues?.getOrNull(1)
+                ?: return null
+            val r2page = app.get(base + r2path, headers = hdr(genDoc.url)).text
+            val direct = Regex("""downloadUrl\s*=\s*"([^"]+)"""")
+                .find(r2page)?.groupValues?.getOrNull(1)
+                ?.replace("\\/", "/")
+            if (direct != null && direct.startsWith("http")) direct else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** MomoFile page → download.php (needs Referer; HEAD may fail on some devices) */
+    private suspend fun resolveMomo(momoUrl: String): Pair<String, String>? {
+        return try {
+            val page = app.get(momoUrl, headers = hdr(mainUrl + "/"))
+            val html = page.text
+            val path = Regex("""download\.php\?t=[^"'\s&]+""").find(html)?.value ?: return null
+            val full = if (path.startsWith("http")) path else "https://momofile.shop/" + path
+            full to momoUrl
         } catch (_: Exception) {
             null
         }
@@ -330,7 +333,6 @@ class KDHindiDubbedProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // data = "MomoFile::https://momofile...||XCloud::https://..."
         val parts = data.split("||").map { it.trim() }.filter { it.isNotBlank() }
         val servers = ArrayList<Pair<String, String>>()
         for (p in parts) {
@@ -344,21 +346,13 @@ class KDHindiDubbedProvider : MainAPI() {
         }
 
         if (servers.isEmpty()) {
-            // data might be a download page or drama url
             try {
                 val doc = app.get(data, headers = hdr()).document
                 val pages = findDownloadPages(doc)
                 val target = pages.firstOrNull()?.second ?: data
                 val pdoc = app.get(target, headers = hdr(data)).document
-                val parsed = parseEpisodeServers(pdoc)
-                for ((_, list) in parsed) {
+                for ((_, list) in parseEpisodeServers(pdoc)) {
                     servers.addAll(list)
-                }
-                if (servers.isEmpty()) {
-                    for (a in pdoc.select("a[href*=momofile]")) {
-                        val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
-                        servers.add("MomoFile" to href)
-                    }
                 }
             } catch (_: Exception) {
             }
@@ -366,28 +360,50 @@ class KDHindiDubbedProvider : MainAPI() {
 
         var found = false
 
-        // Priority: MomoFile first (verified direct mkv)
-        val ordered = servers.sortedByDescending {
-            it.second.contains("momofile", true)
+        // Priority: GKY (R2, Range+HEAD OK) then MomoFile
+        val ordered = servers.sortedBy { pair ->
+            val u = pair.second.lowercase()
+            when {
+                u.contains("gkyfilehost") -> 0
+                u.contains("momofile") -> 1
+                else -> 5
+            }
         }
 
         for ((label, link) in ordered) {
             try {
-                if (link.contains("momofile", true)) {
-                    val direct = resolveMomo(link) ?: continue
-                    callback(
-                        ExtractorLink(
-                            name,
-                            label.ifBlank { "MomoFile" },
-                            direct,
-                            "https://momofile.shop/",
-                            Qualities.P720.value,
-                            false
+                when {
+                    link.contains("gkyfilehost", true) -> {
+                        val direct = resolveGky(link) ?: continue
+                        callback(
+                            ExtractorLink(
+                                name,
+                                (label.ifBlank { "GKY" }) + " • R2",
+                                direct,
+                                "https://new1.gkyfilehost.lol/",
+                                Qualities.P720.value,
+                                false
+                            )
                         )
-                    )
-                    found = true
+                        found = true
+                    }
+                    link.contains("momofile", true) -> {
+                        val pair = resolveMomo(link) ?: continue
+                        val direct = pair.first
+                        val ref = pair.second
+                        callback(
+                            ExtractorLink(
+                                name,
+                                label.ifBlank { "MomoFile" },
+                                direct,
+                                ref,
+                                Qualities.P720.value,
+                                false
+                            )
+                        )
+                        found = true
+                    }
                 }
-                // Other hosts skipped for reliability (xcloud 403, hgcloud JS-only)
             } catch (_: Exception) {
             }
         }
