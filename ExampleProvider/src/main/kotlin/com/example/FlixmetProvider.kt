@@ -122,7 +122,6 @@ class FlixmetProvider : MainAPI() {
             else -> null
         } ?: return null
         if (f <= 0) return null
-        // CloudStream uses rating * 1000 style often 0-10000 for 0-10
         return if (f <= 10.0) (f * 1000).toInt() else f.toInt().coerceIn(0, 10000)
     }
 
@@ -160,7 +159,7 @@ class FlixmetProvider : MainAPI() {
         }
     }
 
-    private fun fetchMovies(): List<FlixItem> {
+    private suspend fun fetchMovies(): List<FlixItem> {
         val json = app.get(mainUrl + "/api/movies", headers = hdr()).text
         return parseJson<ArrayList<FlixItem>>(json)
     }
@@ -202,12 +201,9 @@ class FlixmetProvider : MainAPI() {
         val ql = q.lowercase()
         return all.filter {
             (it.title ?: "").lowercase().contains(ql) ||
-                (it.actors ?: "").lowercase().contains(ql) ||
-                (it.originalTitleSafe()).lowercase().contains(ql)
+                (it.actors ?: "").lowercase().contains(ql)
         }.mapNotNull { itemToSearch(it) }.take(40)
     }
-
-    private fun FlixItem.originalTitleSafe(): String = ""
 
     private fun parseEmbedUuids(embedCode: String?): List<Pair<String, String>> {
         if (embedCode.isNullOrBlank() || embedCode.length < 5) return emptyList()
@@ -300,7 +296,11 @@ class FlixmetProvider : MainAPI() {
         }
     }
 
-    private fun resolvePlayer(uuid: String, label: String, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun resolvePlayer(
+        uuid: String,
+        label: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val embedJson = app.get(
             playerBase + "/api/videos/embed/" + uuid,
             headers = hdr(playerBase + "/embed/" + uuid)
@@ -315,10 +315,6 @@ class FlixmetProvider : MainAPI() {
         if (workers != null && workers.length() > 0) {
             workerId = workers.optJSONObject(0)?.optInt("id") ?: workerId
         }
-
-        val signBody = JSONObject()
-        signBody.put("videoUrl", sourceUrl)
-        signBody.put("workerId", workerId)
 
         val signedResp = app.post(
             playerBase + "/api/videos/stream-sign",
@@ -342,7 +338,7 @@ class FlixmetProvider : MainAPI() {
 
         if (!playUrl.startsWith("http")) return false
 
-        val q = qualityFrom(label + " " + (video.optString("title")))
+        val q = qualityFrom(label + " " + video.optString("title"))
         val isM3u8 = playUrl.contains(".m3u8")
         callback(
             ExtractorLink(
@@ -371,7 +367,6 @@ class FlixmetProvider : MainAPI() {
         if (embeds.isEmpty()) return false
 
         var found = false
-        // Max 3 servers for speed
         embeds.take(3).apmap { pair ->
             val label = pair.first
             val uuid = pair.second
