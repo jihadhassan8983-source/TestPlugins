@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
 
 class FlixmetProvider : MainAPI() {
     override var mainUrl = "https://flixmet.net"
@@ -65,7 +66,7 @@ class FlixmetProvider : MainAPI() {
 
     private fun isSeries(item: FlixItem): Boolean {
         val t = (item.type ?: "").lowercase()
-        if (t == "show" || t == "series") return true
+        if (t == "show" || t == "series" || t == "hybrid") return true
         val title = item.title ?: ""
         return title.contains("Season", true) || title.contains("Series", true)
     }
@@ -77,6 +78,7 @@ class FlixmetProvider : MainAPI() {
         @JsonProperty("poster_url") val posterUrl: String? = null,
         @JsonProperty("backdrop_url") val backdropUrl: String? = null,
         @JsonProperty("embed_code") val embedCode: String? = null,
+        @JsonProperty("download_link") val downloadLink: String? = null,
         @JsonProperty("category") val category: String? = null,
         @JsonProperty("genre") val genre: String? = null,
         @JsonProperty("language") val language: String? = null,
@@ -90,7 +92,8 @@ class FlixmetProvider : MainAPI() {
         @JsonProperty("actors") val actors: String? = null,
         @JsonProperty("directors") val directors: String? = null,
         @JsonProperty("release_date") val releaseDate: String? = null,
-        @JsonProperty("imdb_id") val imdbId: String? = null
+        @JsonProperty("imdb_id") val imdbId: String? = null,
+        @JsonProperty("tmdb_id") val tmdbId: Any? = null
     )
 
     private fun toNumYear(v: Any?): Int? {
@@ -139,6 +142,14 @@ class FlixmetProvider : MainAPI() {
         return t.ifBlank { null }
     }
 
+    private fun hasPlayableEmbed(embedCode: String?): Boolean {
+        if (embedCode.isNullOrBlank()) return false
+        return Regex(
+            """flixplayer\.top/embed/([0-9a-fA-F-]{16,})""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(embedCode)
+    }
+
     private fun itemToSearch(item: FlixItem): SearchResponse? {
         val id = item.id ?: return null
         val titleRaw = item.title ?: return null
@@ -165,6 +176,7 @@ class FlixmetProvider : MainAPI() {
     }
 
     override val mainPage = mainPageOf(
+        "playable" to "Playable",
         "all" to "Latest",
         "movie" to "Movies",
         "hybrid" to "Series Packs",
@@ -179,6 +191,7 @@ class FlixmetProvider : MainAPI() {
         val all = fetchMovies()
         val key = request.data
         val filtered = when (key) {
+            "playable" -> all.filter { hasPlayableEmbed(it.embedCode) }
             "all" -> all
             "movie" -> all.filter { (it.type ?: "movie") == "movie" }
             "hybrid" -> all.filter { (it.type ?: "") == "hybrid" || (it.type ?: "") == "show" }
@@ -199,10 +212,12 @@ class FlixmetProvider : MainAPI() {
         if (q.isEmpty()) return emptyList()
         val all = fetchMovies()
         val ql = q.lowercase()
-        return all.filter {
+        val matched = all.filter {
             (it.title ?: "").lowercase().contains(ql) ||
                 (it.actors ?: "").lowercase().contains(ql)
-        }.mapNotNull { itemToSearch(it) }.take(40)
+        }
+        val sorted = matched.sortedByDescending { hasPlayableEmbed(it.embedCode) }
+        return sorted.mapNotNull { itemToSearch(it) }.take(40)
     }
 
     private fun parseEmbedUuids(embedCode: String?): List<Pair<String, String>> {
@@ -234,13 +249,39 @@ class FlixmetProvider : MainAPI() {
         return out
     }
 
-    private fun buildActors(item: FlixItem): List<ActorData> {
-        val out = ArrayList<ActorData>()
-        item.directors?.split(",")?.map { it.trim() }?.filter { it.length > 1 }?.forEach {
-            out += ActorData(Actor(it), roleString = "Director")
+    private suspend fun fetchActorImage(name: String): String? {
+        return try {
+            val q = URLEncoder.encode(name, "UTF-8")
+            val txt = app.get(
+                "https://api.tvmaze.com/search/people?q=" + q,
+                headers = mapOf("User-Agent" to ua, "Accept" to "application/json")
+            ).text
+            val arr = JSONArray(txt)
+            if (arr.length() == 0) return null
+            val person = arr.optJSONObject(0)?.optJSONObject("person") ?: return null
+            val image = person.optJSONObject("image") ?: return null
+            val medium = image.optString("medium")
+            if (medium.startsWith("http")) medium else null
+        } catch (_: Exception) {
+            null
         }
-        item.actors?.split(",")?.map { it.trim() }?.filter { it.length > 1 }?.take(16)?.forEach {
-            out += ActorData(Actor(it), roleString = "Actor")
+    }
+
+    private suspend fun buildActors(item: FlixItem): List<ActorData> {
+        val out = ArrayList<ActorData>()
+        val directors = item.directors?.split(",")?.map { it.trim() }
+            ?.filter { it.length > 1 }?.take(3) ?: emptyList()
+        val actors = item.actors?.split(",")?.map { it.trim() }
+            ?.filter { it.length > 1 }?.take(10) ?: emptyList()
+
+        val names = directors.map { it to "Director" } + actors.map { it to "Actor" }
+        names.apmap { pair ->
+            val n = pair.first
+            val role = pair.second
+            val img = fetchActorImage(n)
+            synchronized(out) {
+                out += ActorData(Actor(n, img), roleString = role)
+            }
         }
         return out
     }
@@ -311,40 +352,57 @@ class FlixmetProvider : MainAPI() {
         if (sourceUrl.isBlank()) return false
 
         val workers = root.optJSONArray("workers")
-        var workerId = 3
-        if (workers != null && workers.length() > 0) {
-            workerId = workers.optJSONObject(0)?.optInt("id") ?: workerId
+        val workerIds = ArrayList<Int>()
+        if (workers != null) {
+            for (i in 0 until workers.length()) {
+                val wid = workers.optJSONObject(i)?.optInt("id") ?: continue
+                workerIds.add(wid)
+            }
+        }
+        if (workerIds.isEmpty()) workerIds.add(3)
+
+        var playUrl: String? = null
+        for (workerId in workerIds) {
+            try {
+                val signedResp = app.post(
+                    playerBase + "/api/videos/stream-sign",
+                    headers = hdr(playerBase + "/embed/" + uuid) + mapOf(
+                        "Content-Type" to "application/json",
+                        "Origin" to playerBase
+                    ),
+                    json = mapOf(
+                        "videoUrl" to sourceUrl,
+                        "workerId" to workerId
+                    )
+                ).text
+                val signed = JSONObject(signedResp)
+                val u = signed.optString("url")
+                if (u.startsWith("http")) {
+                    playUrl = u
+                    break
+                }
+            } catch (_: Exception) {
+            }
         }
 
-        val signedResp = app.post(
-            playerBase + "/api/videos/stream-sign",
-            headers = hdr(playerBase + "/embed/" + uuid) + mapOf(
-                "Content-Type" to "application/json",
-                "Origin" to playerBase
-            ),
-            json = mapOf(
-                "videoUrl" to sourceUrl,
-                "workerId" to workerId
-            )
-        ).text
-
-        var playUrl = sourceUrl
-        try {
-            val signed = JSONObject(signedResp)
-            val u = signed.optString("url")
-            if (u.startsWith("http")) playUrl = u
-        } catch (_: Exception) {
+        if (playUrl.isNullOrBlank()) {
+            val fileId = Regex("""/file/d/([a-zA-Z0-9_-]+)""").find(sourceUrl)?.groupValues?.getOrNull(1)
+                ?: Regex("""[?&]id=([a-zA-Z0-9_-]+)""").find(sourceUrl)?.groupValues?.getOrNull(1)
+            if (fileId != null) {
+                playUrl = "https://www.googleapis.com/drive/v3/files/" + fileId + "?alt=media"
+            }
         }
 
-        if (!playUrl.startsWith("http")) return false
+        val finalUrl = playUrl
+        if (finalUrl.isNullOrBlank() || !finalUrl.startsWith("http")) return false
 
         val q = qualityFrom(label + " " + video.optString("title"))
-        val isM3u8 = playUrl.contains(".m3u8")
+        val isM3u8 = finalUrl.contains(".m3u8")
         callback(
             ExtractorLink(
                 name,
                 label.ifBlank { "Flixmet" },
-                playUrl,
+                finalUrl,
                 playerBase + "/",
                 q,
                 isM3u8
@@ -367,7 +425,7 @@ class FlixmetProvider : MainAPI() {
         if (embeds.isEmpty()) return false
 
         var found = false
-        embeds.take(3).apmap { pair ->
+        embeds.take(5).apmap { pair ->
             val label = pair.first
             val uuid = pair.second
             try {
