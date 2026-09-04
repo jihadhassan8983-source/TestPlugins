@@ -2,7 +2,6 @@
 
 package com.example
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -42,11 +41,6 @@ class MovieLinkBDProvider : MainAPI() {
 
     private var resolvedBase: String? = null
 
-    data class Srv(
-        @JsonProperty("u") val u: String,
-        @JsonProperty("l") val l: String = "Server"
-    )
-
     private fun hdr(ref: String? = null): Map<String, String> = mapOf(
         "User-Agent" to ua,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -84,10 +78,10 @@ class MovieLinkBDProvider : MainAPI() {
     private fun absUrl(href: String?, base: String): String? {
         if (href.isNullOrBlank()) return null
         val h = href.trim().trim('"', '\'')
+        if (h.startsWith("javascript", true) || h == "#" || h.startsWith("mailto:", true)) return null
         if (h.startsWith("//")) return "https:$h"
         if (h.startsWith("http")) return h
         if (h.startsWith("/")) return base.trimEnd('/') + h
-        if (h.startsWith("javascript", true) || h.startsWith("#")) return null
         return base.trimEnd('/') + "/" + h
     }
 
@@ -115,103 +109,19 @@ class MovieLinkBDProvider : MainAPI() {
         return null
     }
 
-    /** Is this a playable/download server link? */
-    private fun isServerHref(href: String, text: String = ""): Boolean {
-        val h = href.lowercase()
+    private fun qualityFrom(text: String): Int {
         val t = text.lowercase()
-        if (h.contains("facebook") || h.contains("telegram") || h.contains("whatsapp")) return false
-        if (h.contains("twitter") || h.contains("instagram") || h.contains("youtube.com")) return false
-        if (h.contains("/type/") || h.contains("/search") || h.contains("/language/")) return false
-        if (h.contains("/getlink") || h.contains("/getwatch") || h.contains("/file/") || h.contains("/watch/")) return true
-        if (h.contains("/apis/redirect")) return true
-        if (h.contains(".m3u8") || h.contains(".mp4") || h.contains(".mkv")) return true
-        // known hosters
-        val hosts = listOf(
-            "gdflix", "hubcloud", "hubdrive", "drive.google", "mediafire",
-            "pixeldrain", "gofile", "streamtape", "dood", "filepress",
-            "mixdrop", "mega.nz", "zippyshare", "1fichier", "krakenfiles",
-            "fastclick", "racaty", "upstream", "streamsb", "voe.sx"
-        )
-        if (hosts.any { h.contains(it) }) return true
-        // quality button text
-        if (Regex("""\b(480p|720p|1080p|2160p|4k|hevc|x265|x264)\b""").containsMatchIn(t)) {
-            if (h.startsWith("http") && !h.contains("movielinkbd") || h.contains("/get") || h.contains("/file")) {
-                return true
-            }
-            // quality text on same-site link often is getLink
-            if (h.contains("movielinkbd") && (h.contains("/get") || h.contains("/file") || h.contains("/watch"))) return true
+        return when {
+            "2160" in t || "4k" in t -> Qualities.P2160.value
+            "1080" in t -> Qualities.P1080.value
+            "720" in t -> Qualities.P720.value
+            "480" in t -> Qualities.P480.value
+            "360" in t -> Qualities.P360.value
+            else -> Qualities.Unknown.value
         }
-        if (t.contains("watch online") || t.contains("download") || t.contains("server")) {
-            if (h.contains("/get") || h.contains("/file") || h.contains("/watch")) return true
-        }
-        return false
     }
 
-    /** Collect every possible server URL from a detail document */
-    private fun collectServers(doc: Document, html: String, base: String): List<Srv> {
-        val out = LinkedHashMap<String, String>() // url -> label
-
-        fun add(url: String?, label: String) {
-            val u = url?.trim() ?: return
-            if (!u.startsWith("http")) return
-            if (u in out) return
-            out[u] = label.ifBlank { "Server" }
-        }
-
-        // 1) Anchors
-        for (a in doc.select("a[href]")) {
-            val href = absUrl(a.attr("abs:href").ifBlank { a.attr("href") }, base) ?: continue
-            val text = a.text().trim().ifBlank {
-                a.attr("title").ifBlank { a.attr("aria-label") }
-            }
-            if (isServerHref(href, text)) {
-                add(href, text.ifBlank { "Server" }.take(60))
-            }
-        }
-
-        // 2) data-* attributes
-        for (el in doc.select("[data-href], [data-url], [data-link], [data-src], [data-file]")) {
-            for (attr in listOf("data-href", "data-url", "data-link", "data-src", "data-file")) {
-                val href = absUrl(el.attr(attr), base) ?: continue
-                val text = el.text().trim()
-                if (isServerHref(href, text) || href.contains("/get") || href.contains("/file")) {
-                    add(href, text.ifBlank { "Server" }.take(60))
-                }
-            }
-        }
-
-        // 3) onclick location
-        for (el in doc.select("[onclick]")) {
-            val oc = el.attr("onclick")
-            val m = Regex("""['"](https?://[^'"]+)['"]""").find(oc)
-                ?: Regex("""['"](/[^'"]+)['"]""").find(oc)
-            if (m != null) {
-                val href = absUrl(m.groupValues[1], base)
-                if (href != null && isServerHref(href, el.text())) {
-                    add(href, el.text().trim().ifBlank { "Server" }.take(60))
-                }
-            }
-        }
-
-        // 4) Raw path scan
-        Regex("""(?:https?:)?//[^\s"'<>]+/(?:getLink|getWatch|file|watch)/[A-Za-z0-9_\-./%]+""")
-            .findAll(html).forEach { add(it.value.let { v -> if (v.startsWith("//")) "https:$v" else v }, "Server") }
-        Regex("""["'](/(?:getLink|getWatch|file|watch)/[^"']+)["']""")
-            .findAll(html).forEach { add(absUrl(it.groupValues[1], base), "Server") }
-        Regex("""["'](/apis/redirect/[^"']+)["']""")
-            .findAll(html).forEach { add(absUrl(it.groupValues[1], base), "MLBD CDN") }
-
-        // 5) Live server buttons
-        for (a in doc.select("a.mlbd-live-server-btn[href], .mlbd-live-server-btn[href]")) {
-            add(absUrl(a.attr("abs:href").ifBlank { a.attr("href") }, base), a.text().ifBlank { "Live" })
-        }
-
-        // 6) Direct media in page
-        Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4|mkv)[^\s"'<>\\]*""")
-            .findAll(html).forEach { add(it.value, "Direct") }
-
-        return out.map { (u, l) -> Srv(u, l) }
-    }
+    // ---------- listing ----------
 
     override val mainPage = mainPageOf(
         "/type/movies" to "Movies",
@@ -252,21 +162,14 @@ class MovieLinkBDProvider : MainAPI() {
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
 
-        val cards = doc.select(
-            "div.movie-item, div.item-box, div.film-item, div.post-item, .movie-card, article, .card, .item"
-        )
-
         fun addFrom(scope: Element) {
             val a = scope.selectFirst(
                 "a[href*=/movie/], a[href*=/series/], a[href*=/anime/], a[href*=/download18plus/]"
-            ) ?: scope.selectFirst("a[href]") ?: return
+            ) ?: return
 
             var href = absUrl(a.attr("abs:href").ifBlank { a.attr("href") }, base) ?: return
             href = href.substringBefore("#").substringBefore("?").trimEnd('/')
-            if (href in seen) return
-            if (!href.contains("/movie/") && !href.contains("/series/") &&
-                !href.contains("/anime/") && !href.contains("/download18plus/")
-            ) return
+            if (!seen.add(href)) return
 
             var title = a.attr("title").trim()
             if (title.isBlank()) {
@@ -292,18 +195,22 @@ class MovieLinkBDProvider : MainAPI() {
                 else -> TvType.Movie
             }
 
-            seen.add(href)
             out.add(newMovieSearchResponse(title, href, type) { this.posterUrl = poster })
         }
 
+        val cards = doc.select(
+            "div.movie-item, div.item-box, div.film-item, div.post-item, .movie-card, article, .card, .item"
+        )
         if (cards.isNotEmpty()) cards.forEach { addFrom(it) }
         else {
             doc.select(
                 "a[href*=/movie/], a[href*=/series/], a[href*=/anime/], a[href*=/download18plus/]"
-            ).forEach { addFrom(it) }
+            ).forEach { addFrom(it.parent() ?: it) }
         }
         return out
     }
+
+    // ---------- load ----------
 
     override suspend fun load(url: String): LoadResponse {
         val base = getBase()
@@ -345,32 +252,39 @@ class MovieLinkBDProvider : MainAPI() {
             ?: doc.selectFirst(".plot, .description, .synopsis, .entry-content p, .movie-desc")
                 ?.text()?.trim()
 
-        // Collect servers NOW so loadLinks has them even if re-fetch fails
-        val servers = collectServers(doc, html, base)
-        val payload = if (servers.isNotEmpty()) {
-            servers.toJson()
-        } else {
-            // fallback: page url so loadLinks can re-scrape
-            listOf(Srv(pageUrl, "Page")).toJson()
-        }
+        // Collect ALL server links from page (watch + download)
+        val pageServers = collectAllServers(doc, html, base)
+
+        // Build episodes
+        val episodes = buildEpisodes(doc, html, pageUrl, base, pageServers)
 
         val seasonHint = Regex("""S\d+|Season""", RegexOption.IGNORE_CASE)
-        val isSeries = pageUrl.contains("/series/") || seasonHint.containsMatchIn(title)
+        val isSeries = pageUrl.contains("/series/") ||
+            episodes.size > 1 ||
+            seasonHint.containsMatchIn(title)
 
         if (isSeries) {
-            val eps = listOf(
-                newEpisode(payload) {
-                    this.name = "Episode 1"
-                    this.episode = 1
-                }
-            )
+            val eps = if (episodes.isEmpty()) {
+                listOf(
+                    newEpisode(encodePayload(pageUrl, pageServers)) {
+                        name = "Full Pack"
+                        episode = 1
+                    }
+                )
+            } else episodes
+
             return newTvSeriesLoadResponse(title, pageUrl, TvType.TvSeries, eps) {
                 this.posterUrl = poster
                 this.plot = plot
             }
         }
 
-        return newMovieLoadResponse(title, pageUrl, TvType.Movie, payload) {
+        return newMovieLoadResponse(
+            title,
+            pageUrl,
+            TvType.Movie,
+            encodePayload(pageUrl, pageServers)
+        ) {
             this.posterUrl = poster
             this.plot = plot
         }
@@ -388,6 +302,226 @@ class MovieLinkBDProvider : MainAPI() {
         }
     }
 
+    /** Encode pageUrl + server list as JSON map list */
+    private fun encodePayload(pageUrl: String, servers: List<Pair<String, String>>): String {
+        val list = ArrayList<Map<String, String>>()
+        list.add(mapOf("u" to pageUrl, "l" to "PAGE"))
+        for ((u, l) in servers) {
+            list.add(mapOf("u" to u, "l" to l))
+        }
+        return list.toJson()
+    }
+
+    private fun decodePayload(data: String): List<Pair<String, String>> {
+        return try {
+            val raw: List<Map<String, String>> = parseJson(data)
+            raw.mapNotNull { m ->
+                val u = m["u"] ?: return@mapNotNull null
+                val l = m["l"] ?: "Server"
+                u to l
+            }
+        } catch (_: Exception) {
+            listOf(data to "Server")
+        }
+    }
+
+    /**
+     * Collect getWatch / getLink / file / live / external hoster / quality buttons
+     */
+    private fun collectAllServers(
+        doc: Document,
+        html: String,
+        base: String
+    ): List<Pair<String, String>> {
+        val out = LinkedHashMap<String, String>()
+
+        fun add(url: String?, label: String) {
+            var u = url?.trim() ?: return
+            u = absUrl(u, base) ?: return
+            if (!u.startsWith("http")) return
+            if (u.contains("facebook") || u.contains("telegram") || u.contains("whatsapp")) return
+            if (u.contains("/type/") || u.contains("/search?")).return
+            val prev = out[u]
+            if (prev == null || (prev == "Server" && label != "Server")) {
+                out[u] = label.ifBlank { "Server" }.take(80)
+            }
+        }
+
+        // Anchors – broad
+        for (a in doc.select("a[href]")) {
+            val href = a.attr("abs:href").ifBlank { a.attr("href") }
+            val text = a.text().trim().ifBlank {
+                a.attr("title").ifBlank { a.attr("aria-label") }
+            }
+            val h = href.lowercase()
+            val t = text.lowercase()
+            val interesting =
+                h.contains("/getlink") || h.contains("/getwatch") || h.contains("/file/") ||
+                    h.contains("/watch/") || h.contains("/apis/redirect") ||
+                    h.contains("gdflix") || h.contains("hubcloud") || h.contains("hubdrive") ||
+                    h.contains("pixeldrain") || h.contains("gofile") || h.contains("drive.google") ||
+                    h.contains("streamtape") || h.contains("mediafire") ||
+                    a.hasClass("mlbd-live-server-btn") ||
+                    Regex("""\b(480p|720p|1080p|2160p|4k|hevc)\b""").containsMatchIn(t) ||
+                    t.contains("watch online") || t.contains("download") || t.contains("server")
+            if (interesting) add(href, text.ifBlank { "Server" })
+        }
+
+        // data attributes (quality player buttons)
+        for (el in doc.select("[data-href], [data-url], [data-link], [data-src], [data-file], [data-stream], [data-quality]")) {
+            for (attr in listOf("data-href", "data-url", "data-link", "data-src", "data-file", "data-stream")) {
+                val v = el.attr(attr)
+                if (v.isNotBlank()) {
+                    val label = el.text().ifBlank {
+                        el.attr("data-quality").ifBlank { el.attr("title") }
+                    }
+                    add(v, label.ifBlank { "Server" })
+                }
+            }
+        }
+
+        // onclick
+        for (el in doc.select("[onclick]")) {
+            val oc = el.attr("onclick")
+            Regex("""['"](https?://[^'"]+)['"]""").findAll(oc).forEach {
+                add(it.groupValues[1], el.text().ifBlank { "Server" })
+            }
+            Regex("""['"](/(?:getLink|getWatch|file|watch)/[^'"]+)['"]""").findAll(oc).forEach {
+                add(it.groupValues[1], el.text().ifBlank { "Server" })
+            }
+        }
+
+        // live buttons
+        doc.select("a.mlbd-live-server-btn[href], .mlbd-live-server-btn[href]").forEach { a ->
+            add(a.attr("abs:href").ifBlank { a.attr("href") }, a.text().ifBlank { "Live" })
+        }
+
+        // raw paths in HTML
+        Regex("""["'](/(?:getLink|getWatch|file|watch)/[^"'\s]+)["']""").findAll(html).forEach {
+            add(it.groupValues[1], "Server")
+        }
+        Regex("""["'](/apis/redirect/[^"']+)["']""").findAll(html).forEach {
+            add(it.groupValues[1], "MLBD CDN")
+        }
+        Regex("""https?://[^\s"'<>]+/(?:getLink|getWatch|file|watch)/[A-Za-z0-9_\-./%]+""")
+            .findAll(html).forEach { add(it.value, "Server") }
+
+        // direct media
+        Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4|mkv)(?:\?[^\s"'<>\\]*)?""")
+            .findAll(html).forEach { add(it.value, "Direct") }
+
+        // script JSON-ish sources
+        Regex(
+            """["'](?:file|src|url|stream|link)["']\s*:\s*["'](https?://[^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).forEach {
+            add(it.groupValues[1], "Stream")
+        }
+        Regex("""const\s+SRC\s*=\s*["'](https?://[^"']+)["']""").findAll(html).forEach {
+            add(it.groupValues[1], "SRC")
+        }
+
+        return out.map { it.key to it.value }
+    }
+
+    /**
+     * Build episode list:
+     * - individual Ep N sections
+     * - range Ep 1-50 → expand to 50 episodes (same servers if pack)
+     * - fallback one Full Pack
+     */
+    private fun buildEpisodes(
+        doc: Document,
+        html: String,
+        pageUrl: String,
+        base: String,
+        pageServers: List<Pair<String, String>>
+    ): List<Episode> {
+        data class EpBucket(val num: Int, val name: String, val links: MutableList<Pair<String, String>>)
+        val buckets = LinkedHashMap<Int, EpBucket>()
+
+        fun bucket(num: Int, name: String): EpBucket {
+            return buckets.getOrPut(num) { EpBucket(num, name, ArrayList()) }
+        }
+
+        val sections = doc.select(
+            "div.ep-card, [data-ep], div.episode-section, div.season-section, " +
+                "div[class*=episode], div[class*=season], li[class*=episode], " +
+                "tr[class*=episode], .episode-item, .ep-item"
+        )
+
+        val epRegex = Regex(
+            """(?:Ep|Episode|E)\s*([0-9]{1,4})(?:\s*[-–to]+\s*([0-9]{1,4}))?""",
+            RegexOption.IGNORE_CASE
+        )
+
+        if (sections.isNotEmpty()) {
+            sections.forEachIndexed { idx, sec ->
+                val text = sec.text()
+                val m = epRegex.find(text)
+                val start = m?.groupValues?.getOrNull(1)?.toIntOrNull() ?: (idx + 1)
+                val end = m?.groupValues?.getOrNull(2)?.toIntOrNull()
+
+                val localLinks = ArrayList<Pair<String, String>>()
+                for (a in sec.select(
+                    "a[href*=/getLink/], a[href*=/getWatch/], a[href*=/watch/], " +
+                        "a[href*=/file/], a.mlbd-live-server-btn, a[href]"
+                )) {
+                    val href = absUrl(a.attr("abs:href").ifBlank { a.attr("href") }, base) ?: continue
+                    val label = a.text().trim().ifBlank { "Server" }
+                    val hl = href.lowercase()
+                    if (hl.contains("/getlink") || hl.contains("/getwatch") ||
+                        hl.contains("/file/") || hl.contains("/watch/") ||
+                        hl.contains("gdflix") || hl.contains("hubcloud") ||
+                        label.contains("480") || label.contains("720") || label.contains("1080")
+                    ) {
+                        localLinks.add(href to label)
+                    }
+                }
+
+                if (end != null && end > start && end - start < 200) {
+                    // range pack e.g. Ep 1-24
+                    for (n in start..end) {
+                        val b = bucket(n, "Episode $n")
+                        if (localLinks.isNotEmpty()) b.links.addAll(localLinks)
+                        else b.links.addAll(pageServers)
+                    }
+                } else {
+                    val b = bucket(start, "Episode $start")
+                    if (localLinks.isNotEmpty()) b.links.addAll(localLinks)
+                    else b.links.addAll(pageServers)
+                }
+            }
+        }
+
+        // Title / page text range: "Ep 1-50 Added"
+        if (buckets.isEmpty()) {
+            val m = epRegex.find(doc.text())
+            val start = m?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val end = m?.groupValues?.getOrNull(2)?.toIntOrNull()
+            if (start != null && end != null && end > start && end - start < 200) {
+                for (n in start..end) {
+                    bucket(n, "Episode $n").links.addAll(pageServers)
+                }
+            }
+        }
+
+        // Still empty → single pack
+        if (buckets.isEmpty() && pageServers.isNotEmpty()) {
+            bucket(1, "Full Pack").links.addAll(pageServers)
+        }
+
+        return buckets.toSortedMap().map { (_, b) ->
+            val links = if (b.links.isEmpty()) pageServers else b.links.distinctBy { it.first }
+            newEpisode(encodePayload(pageUrl, links)) {
+                name = b.name
+                episode = b.num
+            }
+        }
+    }
+
+    // ---------- loadLinks ----------
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -399,67 +533,58 @@ class MovieLinkBDProvider : MainAPI() {
         val added = HashSet<String>()
         var found = false
 
-        // Parse JSON list of servers, or treat as single URL
-        val servers = ArrayList<Srv>()
-        try {
-            val list: List<Srv> = parseJson(data)
-            servers.addAll(list)
-        } catch (_: Exception) {
-            try {
-                // maybe array of strings
-                val list: List<String> = parseJson(data)
-                list.forEach { servers.add(Srv(it, "Server")) }
-            } catch (_: Exception) {
-                servers.add(Srv(data, "Server"))
-            }
-        }
+        val items = decodePayload(data).toMutableList()
 
-        // If payload was only the page URL, re-scrape for more links
-        val pageLike = servers.filter {
-            it.u.contains("/movie/") || it.u.contains("/series/") || it.u.contains("/anime/") ||
-                it.l == "Page"
-        }
-        for (p in pageLike) {
+        // Re-scrape PAGE entries for fresh links
+        val pageUrls = items.filter { it.second == "PAGE" }.map { it.first }.toSet()
+        for (pu in pageUrls) {
             try {
-                var pageUrl = p.u
+                var pageUrl = pu
                 if (pageUrl.startsWith("/")) pageUrl = base + pageUrl
                 pageUrl = rewriteHost(pageUrl, base)
                 val html = httpGet(pageUrl, base)
                 val doc = Jsoup.parse(html, base)
-                val extra = collectServers(doc, html, base)
-                for (e in extra) {
-                    if (servers.none { it.u == e.u }) servers.add(e)
+                for (s in collectAllServers(doc, html, base)) {
+                    if (items.none { it.first == s.first }) items.add(s)
                 }
+                // player media already in HTML
+                if (extractAndPushMedia(html, "Player", base, callback, added)) found = true
             } catch (_: Exception) {
             }
         }
 
-        for (s in servers) {
-            var link = s.u.trim()
+        for ((url0, label0) in items) {
+            if (label0 == "PAGE") continue
+            var link = url0.trim()
             if (link.startsWith("/")) link = base + link
-            val label = s.l
+            val label = label0
             try {
                 when {
                     link.contains(".m3u8") || link.contains(".mp4") || link.contains(".mkv") -> {
                         if (pushVideo(link, label, base, callback, added)) found = true
                     }
                     link.contains("/getLink") || link.contains("/file/") -> {
-                        if (resolveGetLink(link, label, base, callback, subtitleCallback, added)) found = true
+                        if (resolveGetLink(link, label, base, callback, subtitleCallback, added)) {
+                            found = true
+                        }
                     }
-                    link.contains("/getWatch") || (link.contains("/watch/") && link.contains("movielinkbd")) -> {
-                        if (resolveGetWatch(link, label, base, callback, subtitleCallback, added)) found = true
+                    link.contains("/getWatch") ||
+                        (link.contains("/watch/") && link.contains("movielinkbd")) -> {
+                        if (resolveGetWatch(link, label, base, callback, subtitleCallback, added)) {
+                            found = true
+                        }
                     }
                     link.contains("/apis/redirect") -> {
                         if (resolveCdnUrl(link, label, base, callback, added)) found = true
                     }
                     else -> {
-                        // external hoster
                         try {
                             if (loadExtractor(link, base, subtitleCallback, callback)) found = true
                         } catch (_: Exception) {
                         }
-                        // still try generic page scrape
-                        if (resolveGeneric(link, label, base, callback, subtitleCallback, added)) found = true
+                        if (resolveGeneric(link, label, base, callback, subtitleCallback, added)) {
+                            found = true
+                        }
                     }
                 }
             } catch (_: Exception) {
@@ -476,48 +601,42 @@ class MovieLinkBDProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         added: HashSet<String>
     ): Boolean {
-        var ok = false
         val html = try {
             httpGet(url, base)
         } catch (_: Exception) {
             return false
         }
+        var ok = false
 
-        // file: '/apis/redirect/...'
         Regex("""file\s*:\s*["'](/apis/redirect/[^"']+)""").findAll(html).forEach { m ->
-            if (resolveCdnUrl(base + m.groupValues[1], "MLBD CDN - $label", base, callback, added)) {
+            if (resolveCdnUrl(base + m.groupValues[1], "CDN - $label", base, callback, added)) {
                 ok = true
             }
         }
         Regex("""["'](/apis/redirect/[^"']+)["']""").findAll(html).forEach { m ->
-            if (resolveCdnUrl(base + m.groupValues[1], "MLBD CDN - $label", base, callback, added)) {
+            if (resolveCdnUrl(base + m.groupValues[1], "CDN - $label", base, callback, added)) {
                 ok = true
             }
         }
-
-        // const SRC = "https://..."
         Regex("""const\s+SRC\s*=\s*["'](https?://[^"']+)["']""").findAll(html).forEach { m ->
             if (pushVideo(m.groupValues[1], "SRC - $label", base, callback, added)) ok = true
         }
 
-        // nested external links on getLink page
+        // external hosters on intermediate page
         val doc = Jsoup.parse(html, base)
         for (a in doc.select("a[href]")) {
             val href = absUrl(a.attr("abs:href").ifBlank { a.attr("href") }, base) ?: continue
             if (href.contains("movielinkbd")) continue
-            if (isServerHref(href, a.text())) {
-                try {
-                    if (loadExtractor(href, url, subtitleCallback, callback)) ok = true
-                } catch (_: Exception) {
-                }
-                if (href.contains(".m3u8") || href.contains(".mp4") || href.contains(".mkv")) {
-                    if (pushVideo(href, a.text().ifBlank { label }, base, callback, added)) ok = true
-                }
+            try {
+                if (loadExtractor(href, url, subtitleCallback, callback)) ok = true
+            } catch (_: Exception) {
+            }
+            if (href.contains(".m3u8") || href.contains(".mp4") || href.contains(".mkv")) {
+                if (pushVideo(href, a.text().ifBlank { label }, base, callback, added)) ok = true
             }
         }
 
-        if (pushMediaFromHtml(html, "DL - $label", base, callback, added)) ok = true
-
+        if (extractAndPushMedia(html, "DL - $label", base, callback, added)) ok = true
         try {
             if (loadExtractor(url, base, subtitleCallback, callback)) ok = true
         } catch (_: Exception) {
@@ -533,20 +652,18 @@ class MovieLinkBDProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         added: HashSet<String>
     ): Boolean {
-        var ok = false
         val html = try {
             httpGet(url, base)
         } catch (_: Exception) {
             return false
         }
+        var ok = false
 
         Regex("""(https?://[^\s'"]+/watch/[^\s'"]*)""").findAll(html).forEach { m ->
             if (resolveXCloud(m.groupValues[1], label, base, callback, added)) ok = true
         }
-
         if (resolveXCloud(url, label, base, callback, added)) ok = true
-        if (pushMediaFromHtml(html, "XCloud - $label", base, callback, added)) ok = true
-
+        if (extractAndPushMedia(html, "Watch - $label", base, callback, added)) ok = true
         try {
             if (loadExtractor(url, base, subtitleCallback, callback)) ok = true
         } catch (_: Exception) {
@@ -571,16 +688,13 @@ class MovieLinkBDProvider : MainAPI() {
         }
         try {
             val html = httpGet(url, base)
-            if (pushMediaFromHtml(html, label, base, callback, added)) ok = true
-            // external links inside
-            val doc = Jsoup.parse(html, base)
-            for (a in doc.select("a[href]")) {
+            if (extractAndPushMedia(html, label, base, callback, added)) ok = true
+            for (a in Jsoup.parse(html, base).select("a[href]")) {
                 val href = absUrl(a.attr("abs:href").ifBlank { a.attr("href") }, base) ?: continue
-                if (!href.contains("movielinkbd") && isServerHref(href, a.text())) {
-                    try {
-                        if (loadExtractor(href, url, subtitleCallback, callback)) ok = true
-                    } catch (_: Exception) {
-                    }
+                if (href.contains("movielinkbd")) continue
+                try {
+                    if (loadExtractor(href, url, subtitleCallback, callback)) ok = true
+                } catch (_: Exception) {
                 }
             }
         } catch (_: Exception) {
@@ -606,10 +720,9 @@ class MovieLinkBDProvider : MainAPI() {
             if (final.contains(".m3u8") || final.contains(".mp4") || final.contains(".mkv")) {
                 if (pushVideo(final, label, base, callback, added)) ok = true
             }
-            if (pushMediaFromHtml(resp.text, label, base, callback, added)) ok = true
-            // if body is tiny maybe it's still a URL
+            if (extractAndPushMedia(resp.text, label, base, callback, added)) ok = true
             val body = resp.text.trim()
-            if (body.startsWith("http") && body.length < 500) {
+            if (body.startsWith("http") && body.length < 800) {
                 if (pushVideo(body.lineSequence().first(), label, base, callback, added)) ok = true
             }
             ok
@@ -632,7 +745,7 @@ class MovieLinkBDProvider : MainAPI() {
             val inlineEl = Jsoup.parse(html).selectFirst("script#mlbdInlinePlayerData")
             val inline = inlineEl?.data()?.ifBlank { null } ?: inlineEl?.html()
             if (!inline.isNullOrBlank()) {
-                if (pushMediaFromHtml(inline, "XCloud - $label", base, callback, added)) ok = true
+                if (extractAndPushMedia(inline, "XCloud - $label", base, callback, added)) ok = true
             }
 
             for (iframe in Jsoup.parse(html, base).select("iframe[src]")) {
@@ -642,7 +755,9 @@ class MovieLinkBDProvider : MainAPI() {
                 ) ?: continue
                 try {
                     val inner = httpGet(src, pageUrl)
-                    if (pushMediaFromHtml(inner, "XCloud - $label", base, callback, added)) ok = true
+                    if (extractAndPushMedia(inner, "XCloud - $label", base, callback, added)) {
+                        ok = true
+                    }
                 } catch (_: Exception) {
                 }
             }
@@ -651,14 +766,14 @@ class MovieLinkBDProvider : MainAPI() {
                 if (pushVideo(it.groupValues[1], "XCloud - $label", base, callback, added)) ok = true
             }
 
-            if (pushMediaFromHtml(html, "XCloud - $label", base, callback, added)) ok = true
+            if (extractAndPushMedia(html, "XCloud - $label", base, callback, added)) ok = true
             ok
         } catch (_: Exception) {
             false
         }
     }
 
-    private fun pushMediaFromHtml(
+    private fun extractAndPushMedia(
         html: String,
         label: String,
         referer: String,
@@ -673,8 +788,19 @@ class MovieLinkBDProvider : MainAPI() {
         Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").findAll(html).forEach {
             if (pushVideo(it.value, label, referer, callback, added)) ok = true
         }
-        Regex("""https?://[^\s"'<>\\]+\.(?:mp4|mkv)[^\s"'<>\\]*""").findAll(html).forEach {
+        Regex("""https?://[^\s"'<>\\]+\.(?:mp4|mkv)(?:\?[^\s"'<>\\]*)?""").findAll(html).forEach {
             if (pushVideo(it.value, label, referer, callback, added)) ok = true
+        }
+        Regex(
+            """["'](?:file|src|url|stream|link)["']\s*:\s*["'](https?://[^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).forEach {
+            val u = it.groupValues[1]
+            if (u.contains(".m3u8") || u.contains(".mp4") || u.contains(".mkv") ||
+                u.contains("/stream") || u.contains("/video")
+            ) {
+                if (pushVideo(u, label, referer, callback, added)) ok = true
+            }
         }
         try {
             for (v in Jsoup.parse(html).select("video source[src], video[src], source[src]")) {
@@ -701,20 +827,13 @@ class MovieLinkBDProvider : MainAPI() {
         if (u.contains("youtube", true) || u.contains("favicon", true)) return false
         if (!added.add(u)) return false
 
-        val q = when {
-            label.contains("1080", true) || u.contains("1080") -> Qualities.P1080.value
-            label.contains("720", true) || u.contains("720") -> Qualities.P720.value
-            label.contains("480", true) || u.contains("480") -> Qualities.P480.value
-            else -> Qualities.Unknown.value
-        }
-
         callback.invoke(
             ExtractorLink(
                 name,
                 label,
                 u,
                 referer,
-                q,
+                qualityFrom(label + " " + u),
                 u.contains(".m3u8")
             )
         )
