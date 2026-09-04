@@ -12,6 +12,6 @@ class ExamplePlugin : BasePlugin() {
         registerMainAPI(AnimeKaiProvider())
         registerMainAPI(CineFreakProvider())
         registerMainAPI(FlixmetProvider())
-        registerMainAPI(KDHindiDubbedProvider())
+        registerMainAPI(KDramasMazaProvider())
     }
 }
