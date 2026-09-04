@@ -11,5 +11,6 @@ class ExamplePlugin : BasePlugin() {
         registerMainAPI(AnimeDriveProvider())
         registerMainAPI(AnimeKaiProvider())
         registerMainAPI(CineFreakProvider())
+        registerMainAPI(FlixmetProvider())
     }
 }
