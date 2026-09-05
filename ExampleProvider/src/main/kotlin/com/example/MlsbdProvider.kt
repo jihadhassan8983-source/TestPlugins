@@ -15,7 +15,7 @@ import java.net.URI
 import java.net.URLEncoder
 
 class MlsbdProvider : MainAPI() {
-    override var mainUrl = "https://mlsbd.co"
+    override var mainUrl = "https://mlsbdtv.se"
     override var name = "MLSBD"
     override val hasMainPage = true
     override var lang = "bn"
