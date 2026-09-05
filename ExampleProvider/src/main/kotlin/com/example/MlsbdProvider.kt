@@ -11,7 +11,7 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import java.net.URI
 import java.net.URLEncoder
 
 class MlsbdProvider : MainAPI() {
@@ -26,7 +26,6 @@ class MlsbdProvider : MainAPI() {
         TvType.AsianDrama
     )
 
-    // Cloudflare থাকলে মোবাইলে প্রায়ই চলে; না চললে নিচের mirror ব্যবহার করো
     private val mirrors = listOf(
         "https://mlsbd.co",
         "https://mlsbdtv.se",
@@ -57,20 +56,24 @@ class MlsbdProvider : MainAPI() {
 
     private suspend fun fetch(url: String): String {
         var last = ""
-        val path = url.removePrefix(mainUrl).ifBlank { "/" }
         for (base in listOf(mainUrl) + mirrors.filter { it != mainUrl }) {
-            val u = if (url.startsWith("http")) {
-                // swap host to current base when retrying
-                try {
-                    val pathPart = java.net.URI(url).path + (java.net.URI(url).query?.let { "?$it" } ?: "")
+            val u = try {
+                if (url.startsWith("http")) {
+                    val uri = URI(url)
+                    val pathPart = (uri.path ?: "/") + (uri.query?.let { "?$it" } ?: "")
                     base.trimEnd('/') + pathPart
-                } catch (_: Throwable) {
-                    url
+                } else {
+                    base.trimEnd('/') + url
                 }
-            } else base.trimEnd('/') + path
+            } catch (_: Throwable) {
+                url
+            }
             try {
                 val doc = app.get(u, headers = hdr, timeout = 30).text
-                if (doc.length > 2000 && "Verify you are human" !in doc && "just a moment" !in doc.lowercase()) {
+                if (doc.length > 2000 &&
+                    !doc.contains("Verify you are human") &&
+                    !doc.lowercase().contains("just a moment")
+                ) {
                     mainUrl = base.trimEnd('/')
                     return doc
                 }
@@ -98,23 +101,24 @@ class MlsbdProvider : MainAPI() {
     private fun parseCards(html: String): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
-        // <article> ... entry-title <a href> + img
+
         val articles = Regex(
             """<article[^>]*>[\s\S]*?</article>""",
             RegexOption.IGNORE_CASE
         ).findAll(html)
+
         for (art in articles) {
             val block = art.value
             val href = Regex(
-                """class="[^"]*entry-title[^"]*"[^>]*>\s*<a[^>]+href=["']([^"']+)["']""",
+                """class="[^"]*entry-title[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"""",
                 RegexOption.IGNORE_CASE
             ).find(block)?.groupValues?.getOrNull(1)
                 ?: Regex(
-                    """<h2[^>]*class="[^"]*entry-title[^"]*"[^>]*>\s*<a[^>]+href=["']([^"']+)["']""",
+                    """<h2[^>]*class="[^"]*entry-title[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"""",
                     RegexOption.IGNORE_CASE
                 ).find(block)?.groupValues?.getOrNull(1)
                 ?: Regex(
-                    """<a[^>]+href=["'](https?://[^"']+)["'][^>]*rel=["']bookmark["']""",
+                    """<a[^>]+href="(https?://[^"]+)"[^>]*rel="bookmark"""",
                     RegexOption.IGNORE_CASE
                 ).find(block)?.groupValues?.getOrNull(1)
                 ?: continue
@@ -124,7 +128,7 @@ class MlsbdProvider : MainAPI() {
             if ("/category/" in url || "/genre/" in url || "/tag/" in url || "/page/" in url) continue
 
             val title = Regex(
-                """<a[^>]+href=["'][^"']*["'][^>]*title=["']([^"']+)["']""",
+                """<a[^>]+href="[^"]*"[^>]*title="([^"]+)"""",
                 RegexOption.IGNORE_CASE
             ).find(block)?.groupValues?.getOrNull(1)
                 ?: Regex(
@@ -134,7 +138,7 @@ class MlsbdProvider : MainAPI() {
                 ?: url.substringAfterLast('/').replace('-', ' ')
 
             val poster = Regex(
-                """<img[^>]+(?:data-src|src)=["']([^"']+)["']""",
+                """<img[^>]+(?:data-src|src)="([^"]+)"""",
                 RegexOption.IGNORE_CASE
             ).find(block)?.groupValues?.getOrNull(1)
 
@@ -154,18 +158,15 @@ class MlsbdProvider : MainAPI() {
             )
         }
 
-        // fallback: any bookmark title links
         if (out.isEmpty()) {
             Regex(
-                """<a[^>]+href=["'](https?://[^"']+)["'][^>]*title=["']([^"']+)["'][^>]*rel=["']bookmark["']""",
+                """<a[^>]+href="(https?://[^"]+)"[^>]*title="([^"]+)"[^>]*rel="bookmark"""",
                 RegexOption.IGNORE_CASE
             ).findAll(html).forEach { m ->
                 val url = absUrl(m.groupValues[1]).substringBefore("?").trimEnd('/') + "/"
                 if (!seen.add(url)) return@forEach
                 if ("/category/" in url || "/genre/" in url) return@forEach
-                out.add(
-                    newMovieSearchResponse(m.groupValues[2].trim(), url, TvType.Movie)
-                )
+                out.add(newMovieSearchResponse(m.groupValues[2].trim(), url, TvType.Movie))
             }
         }
         return out
@@ -176,55 +177,46 @@ class MlsbdProvider : MainAPI() {
         val html = fetch(pageUrl)
 
         val title = Regex(
-            """property=["']og:title["'][^>]+content=["']([^"']+)["']""",
+            """property="og:title"[^>]+content="([^"]+)"""",
             RegexOption.IGNORE_CASE
         ).find(html)?.groupValues?.getOrNull(1)
             ?: Regex(
-                """<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([^<]+)</h1>""",
+                """<h1[^>]*class="[^"]*entry-title[^"]*"[^>]*>([^<]+)</h1>""",
                 RegexOption.IGNORE_CASE
             ).find(html)?.groupValues?.getOrNull(1)
             ?: pageUrl.trimEnd('/').substringAfterLast('/').replace('-', ' ')
 
         val poster = Regex(
-            """property=["']og:image["'][^>]+content=["']([^"']+)["']""",
+            """property="og:image"[^>]+content="([^"]+)"""",
             RegexOption.IGNORE_CASE
         ).find(html)?.groupValues?.getOrNull(1)
-            ?: Regex(
-                """<img[^>]+(?:data-src|src)=["'](https?://[^"']+)["'][^>]*(?:class|alt)=["'][^"']*""",
-                RegexOption.IGNORE_CASE
-            ).find(html)?.groupValues?.getOrNull(1)
 
         val plot = Regex(
-            """property=["']og:description["'][^>]+content=["']([^"']+)["']""",
+            """property="og:description"[^>]+content="([^"]+)"""",
             RegexOption.IGNORE_CASE
         ).find(html)?.groupValues?.getOrNull(1)
-            ?: Regex(
-                """<p><strong><a[^>]*>[^<]*</a></strong>[^<]*</p>""",
-                RegexOption.IGNORE_CASE
-            ).find(html)?.value?.let { Regex("""<[^>]+>""").replace(it, "").trim() }
 
         val year = Regex("""\((20\d{2}|19\d{2})\)""").find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?: Regex(
-                """Release:\s*</strong>\s*<a[^>]*>\s*(20\d{2}|19\d{2})""",
-                RegexOption.IGNORE_CASE
-            ).find(html)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
         val tags = Regex(
-            """itemprop=["']genre["'][^>]*>([^<]+)""",
+            """itemprop="genre"[^>]*>([^<]+)""",
             RegexOption.IGNORE_CASE
         ).findAll(html).map { it.groupValues[1].trim() }.filter { it.isNotBlank() }.distinct().toList()
 
-        // Watch links from server table — encode into data for loadLinks
         val watchLinks = extractWatchLinks(html)
-        val dataPayload = if (watchLinks.isEmpty()) pageUrl
-        else pageUrl + "|||" + watchLinks.joinToString("|||") { "\( {it.first}:: \){it.second}" }
+        val dataPayload = if (watchLinks.isEmpty()) {
+            pageUrl
+        } else {
+            pageUrl + "|||" + watchLinks.joinToString("|||") { pair ->
+                pair.first + "::" + pair.second
+            }
+        }
 
         val isSeries = Regex(
             """season|series|complete|episode""",
             RegexOption.IGNORE_CASE
         ).containsMatchIn(title)
 
-        // MLSBD often packs full season as one file → single episode entry
         return if (isSeries) {
             val ep = newEpisode(dataPayload) {
                 this.name = title.trim()
@@ -246,58 +238,53 @@ class MlsbdProvider : MainAPI() {
         }
     }
 
-    /** Parse <tr class="tritem"> Watch hrefs (skip pure Download file pages when Watch exists). */
     private fun extractWatchLinks(html: String): List<Pair<String, String>> {
         val out = ArrayList<Pair<String, String>>()
         val seen = HashSet<String>()
-        Regex("""<tr class="tritem">([\s\S]*?)</tr>""", RegexOption.IGNORE_CASE)
-            .findAll(html)
-            .forEach { rowMatch ->
-                val row = rowMatch.value
-                val serverName = Regex(
-                    """<td[^>]*>\s*([^<]+)\s*</td>""",
-                    RegexOption.IGNORE_CASE
-                ).find(row)?.groupValues?.getOrNull(1)?.trim() ?: "Server"
 
-                // Prefer links titled Watch
-                val watchHref = Regex(
-                    """href=["']([^"']+)["'][^>]*>\s*Watch\s*<""",
-                    RegexOption.IGNORE_CASE
-                ).find(row)?.groupValues?.getOrNull(1)
-                    ?: Regex(
-                        """href=["']([^"']+)["'][^>]*>\s*Watch""",
-                        RegexOption.IGNORE_CASE
-                    ).find(row)?.groupValues?.getOrNull(1)
+        Regex(
+            """<tr class="tritem">([\s\S]*?)</tr>""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).forEach { rowMatch ->
+            val row = rowMatch.value
+            val serverName = Regex(
+                """<td[^>]*>\s*([^<]+)\s*</td>""",
+                RegexOption.IGNORE_CASE
+            ).find(row)?.groupValues?.getOrNull(1)?.trim() ?: "Server"
 
-                val candidates = ArrayList<String>()
-                if (watchHref != null) candidates.add(watchHref)
-                // also embed-style links in row
-                Regex("""href=["']([^"']+)["']""", RegexOption.IGNORE_CASE).findAll(row)
-                    .forEach { candidates.add(it.groupValues[1]) }
+            val candidates = ArrayList<String>()
+            Regex(
+                """href="([^"]+)"[^>]*>\s*Watch""",
+                RegexOption.IGNORE_CASE
+            ).findAll(row).forEach { candidates.add(it.groupValues[1]) }
+            Regex(
+                """href="([^"]+)"""",
+                RegexOption.IGNORE_CASE
+            ).findAll(row).forEach { candidates.add(it.groupValues[1]) }
 
-                for (raw in candidates) {
-                    val link = normalizeLink(raw) ?: continue
-                    // skip pure download /f/ if we already have /e/ embed
-                    val key = link.substringBefore("?").lowercase()
-                    if (!seen.add(key)) continue
-                    // skip ad / self links
-                    if ("mlsbd" in key && "/watch" !in key && "embed" !in key) {
-                        if (!listOf("ok.ru", "mixdrop", "dood", "do7go", "pkembed", "streamtape", "filemoon")
-                                .any { it in key }
-                        ) continue
-                    }
-                    if (listOf("highperformance", "effectivecpm", "facebook", "twitter", "t.me")
-                            .any { it in key }
-                    ) continue
-                    out.add(serverName to link)
-                    break // one primary per row
-                }
+            for (raw in candidates) {
+                val link = normalizeLink(raw) ?: continue
+                val key = link.substringBefore("?").lowercase()
+                if (!seen.add(key)) continue
+
+                val hosts = listOf(
+                    "ok.ru", "mixdrop", "miixdrop", "dood", "do7go",
+                    "pkembed", "streamtape", "filemoon", "voe", "upstream"
+                )
+                val isHost = hosts.any { it in key }
+                if (!isHost && "mlsbd" in key) continue
+                if (listOf("highperformance", "effectivecpm", "facebook", "twitter", "t.me")
+                        .any { it in key }
+                ) continue
+
+                out.add(serverName to link)
+                break
             }
+        }
 
-        // fallback embeds in page
         if (out.isEmpty()) {
             Regex(
-                """(?:src|href)=["'](https?://[^"']*(?:embed|videoembed|/e/)[^"']+)["']""",
+                """(?:src|href)="(https?://[^"]*(?:embed|videoembed|/e/)[^"]+)"""",
                 RegexOption.IGNORE_CASE
             ).findAll(html).forEach { m ->
                 val link = normalizeLink(m.groupValues[1]) ?: return@forEach
@@ -310,7 +297,6 @@ class MlsbdProvider : MainAPI() {
     private fun normalizeLink(raw: String): String? {
         var u = raw.trim()
         if (u.isBlank() || u == "#" || u.startsWith("javascript", true)) return null
-        // fix broken ttps://
         if (u.startsWith("ttps://")) u = "h$u"
         if (u.startsWith("//")) u = "https:$u"
         if (!u.startsWith("http")) {
@@ -338,28 +324,29 @@ class MlsbdProvider : MainAPI() {
     ): Boolean {
         val parts = data.split("|||")
         val pageUrl = parts.firstOrNull()?.trim().orEmpty()
-        val preParsed = parts.drop(1).mapNotNull {
-            val idx = it.indexOf("::")
+        val preParsed = parts.drop(1).mapNotNull { item ->
+            val idx = item.indexOf("::")
             if (idx <= 0) null
-            else it.substring(0, idx) to it.substring(idx + 2)
+            else item.substring(0, idx) to item.substring(idx + 2)
         }
 
-        val links = if (preParsed.isNotEmpty()) preParsed
-        else {
+        val links = if (preParsed.isNotEmpty()) {
+            preParsed
+        } else {
             val html = fetch(if (pageUrl.startsWith("http")) pageUrl else data)
             extractWatchLinks(html)
-        }
-
-        if (links.isEmpty() && pageUrl.startsWith("http")) {
-            val html = fetch(pageUrl)
-            extractWatchLinks(html).forEach { (name, link) ->
-                resolveOne(name, link, subtitleCallback, callback)
-            }
         }
 
         var found = false
         for ((name, link) in links) {
             if (resolveOne(name, link, subtitleCallback, callback)) found = true
+        }
+
+        if (!found && pageUrl.startsWith("http")) {
+            val html = fetch(pageUrl)
+            for ((name, link) in extractWatchLinks(html)) {
+                if (resolveOne(name, link, subtitleCallback, callback)) found = true
+            }
         }
         return found
     }
@@ -372,34 +359,22 @@ class MlsbdProvider : MainAPI() {
     ): Boolean {
         var ok = false
         try {
-            // Built-in extractors: MixDrop, Dood, OkRu, etc.
+            // loadExtractor already returns ExtractorLink — forward directly (no suspend in lambda)
             loadExtractor(link, mainUrl, subtitleCallback) { ext ->
                 ok = true
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "$serverName · ${ext.name}",
-                        url = ext.url,
-                        type = ext.type
-                    ) {
-                        this.referer = ext.referer
-                        this.quality = ext.quality
-                        this.headers = ext.headers
-                    }
-                )
+                callback.invoke(ext)
             }
         } catch (_: Throwable) {
         }
 
-        // Direct m3u8/mp4 fallback
         if (!ok && (link.contains(".m3u8") || link.contains(".mp4"))) {
             ok = true
-            callback(
+            callback.invoke(
                 newExtractorLink(
                     source = name,
                     name = serverName,
                     url = link,
-                    type = if (".m3u8" in link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    type = if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = mainUrl
                     this.quality = Qualities.P1080.value
