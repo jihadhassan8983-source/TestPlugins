@@ -12,5 +12,6 @@ class ExamplePlugin : BasePlugin() {
         registerMainAPI(FlixmetProvider())
         registerMainAPI(HiAnimeProvider())
         registerMainAPI(MlsbdProvider())
+        registerMainAPI(AniWaves())
     }
 }
