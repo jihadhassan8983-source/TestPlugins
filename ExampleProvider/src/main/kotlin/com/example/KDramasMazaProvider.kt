@@ -74,11 +74,9 @@ class KDramasMazaProvider : MainAPI() {
             if (!seen.add(href)) continue
             val titleRaw = a.text().trim()
             if (titleRaw.isBlank()) continue
-            val title = cleanTitle(titleRaw)
             val parent = a.parents().firstOrNull { it.selectFirst("img") != null } ?: a.parent()
-            val poster = parent?.let { pickImg(it) }
-            out += newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                this.posterUrl = poster
+            out += newTvSeriesSearchResponse(cleanTitle(titleRaw), href, TvType.TvSeries) {
+                this.posterUrl = parent?.let { pickImg(it) }
                 this.year = yearFrom(titleRaw)
             }
         }
@@ -116,147 +114,115 @@ class KDramasMazaProvider : MainAPI() {
         return parseCards(doc)
     }
 
-    /**
-     * Collect archive links. Prefer "All Episodes Wise" over "Zip Download".
-     * Returns sorted list: wise first, then others.
-     */
+    /** Prefer All Episodes Wise over Zip */
     private fun findArchiveLinks(html: String): List<String> {
         val scored = ArrayList<Pair<Int, String>>()
 
-        // <button onclick="window.location.href='URL'">Label</button>
-        val btnRegex = Regex(
-            """<button([^>]*)>([\s\S]*?)</button>""",
-            RegexOption.IGNORE_CASE
-        )
-        for (m in btnRegex.findAll(html)) {
+        for (m in Regex("""<button([^>]*)>([\s\S]*?)</button>""", RegexOption.IGNORE_CASE).findAll(html)) {
             val attrs = m.groupValues[1]
             val label = m.groupValues[2].replace(Regex("""<[^>]+>"""), "").trim().lowercase()
             val href = Regex(
                 """(?:location\.href|window\.location)\s*=\s*['"](https?://kdramasmaza\.com\.pk/archives/\d+)['"]""",
                 RegexOption.IGNORE_CASE
             ).find(attrs)?.groupValues?.getOrNull(1) ?: continue
-
             val score = when {
-                label.contains("episode") && label.contains("wise") -> 0
-                label.contains("wise") -> 0
-                label.contains("zip") -> 2
+                "wise" in label -> 0
+                "zip" in label -> 2
                 else -> 1
             }
             scored.add(score to href)
         }
 
-        // plain href fallback
         for (m in Regex(
             """href\s*=\s*["'](https?://kdramasmaza\.com\.pk/archives/\d+)["']""",
             RegexOption.IGNORE_CASE
         ).findAll(html)) {
             val href = m.groupValues[1]
-            if (scored.none { it.second == href }) {
-                scored.add(1 to href)
-            }
+            if (scored.none { it.second == href }) scored.add(1 to href)
         }
 
-        // onclick without button wrapper
         for (m in Regex(
             """(?:location\.href|window\.location)\s*=\s*['"](https?://kdramasmaza\.com\.pk/archives/\d+)['"]""",
             RegexOption.IGNORE_CASE
         ).findAll(html)) {
             val href = m.groupValues[1]
-            if (scored.none { it.second == href }) {
-                scored.add(1 to href)
-            }
+            if (scored.none { it.second == href }) scored.add(1 to href)
         }
 
         return scored.sortedBy { it.first }.map { it.second }.distinct()
     }
 
     /**
-     * Parse by <span class="ep-no">Episode 01</span> blocks (most reliable).
-     * Fallback: Episode N text split.
+     * Returns list of (episodeNumber, hubcloudUrl, extraUrls)
+     * data for loadLinks = hubcloudUrl only (simple, no encoding issues)
      */
-    private fun parseEpisodes(html: String): List<Pair<Int, List<Pair<String, String>>>> {
-        val out = ArrayList<Pair<Int, List<Pair<String, String>>>>()
+    private fun parseEpisodes(html: String): List<Triple<Int, String, List<String>>> {
+        val out = ArrayList<Triple<Int, String, List<String>>>()
 
-        // Method 1: ep-no spans
+        // Split by ep-no labels
+        val labelRegex = Regex(
+            """<span[^>]*ep-no[^>]*>\s*Episode\s*(\d+)\s*</span>""",
+            RegexOption.IGNORE_CASE
+        )
+        val labels = labelRegex.findAll(html).map { it.groupValues[1].toInt() }.toList()
+        if (labels.isEmpty()) {
+            // fallback text split
+            return parseEpisodesFallback(html)
+        }
+
         val parts = Regex(
-            """<span[^>]*class=["'][^"']*ep-no[^"']*["'][^>]*>\s*(Episode\s*\d+)\s*</span>""",
+            """<span[^>]*ep-no[^>]*>\s*Episode\s*\d+\s*</span>""",
             RegexOption.IGNORE_CASE
         ).split(html)
 
-        val labels = Regex(
-            """<span[^>]*class=["'][^"']*ep-no[^"']*["'][^>]*>\s*Episode\s*(\d+)\s*</span>""",
-            RegexOption.IGNORE_CASE
-        ).findAll(html).map { it.groupValues[1].toIntOrNull() }.filterNotNull().toList()
+        for (i in labels.indices) {
+            val ep = labels[i]
+            val block = if (i + 1 < parts.size) parts[i + 1].take(3000) else ""
+            val hubs = Regex(
+                """https?://(?:www\.)?hubcloud\.[a-z]+/drive/[a-zA-Z0-9]+""",
+                RegexOption.IGNORE_CASE
+            ).findAll(block).map { it.value }.distinct().toList()
 
-        if (labels.isNotEmpty() && parts.size >= 2) {
-            // split() result: [before, after1, after2, ...] corresponding to each match
-            for (i in labels.indices) {
-                val ep = labels[i]
-                val block = if (i + 1 < parts.size) parts[i + 1] else ""
-                // only until next episode-row roughly - take limited chunk
-                val chunk = block.take(2500)
-                val servers = extractServers(chunk)
-                if (servers.isNotEmpty()) {
-                    out.add(ep to servers)
-                }
+            val extras = ArrayList<String>()
+            for (m in Regex(
+                """https?://(?:new\d+\.)?gdflix\.[a-z]+/file/[a-zA-Z0-9]+""",
+                RegexOption.IGNORE_CASE
+            ).findAll(block)) {
+                extras.add(m.value)
             }
-            if (out.isNotEmpty()) return out
-        }
 
-        // Method 2: Episode N text
+            if (hubs.isNotEmpty()) {
+                out.add(Triple(ep, hubs.first(), hubs.drop(1) + extras))
+            } else if (extras.isNotEmpty()) {
+                out.add(Triple(ep, extras.first(), extras.drop(1)))
+            }
+        }
+        return out
+    }
+
+    private fun parseEpisodesFallback(html: String): List<Triple<Int, String, List<String>>> {
+        val out = ArrayList<Triple<Int, String, List<String>>>()
         val epRegex = Regex(
             """Episode\s*0*(\d+)([\s\S]*?)(?=Episode\s*0*\d+|\z)""",
             RegexOption.IGNORE_CASE
         )
         for (m in epRegex.findAll(html)) {
             val ep = m.groupValues[1].toIntOrNull() ?: continue
-            val servers = extractServers(m.groupValues[2].take(2500))
-            if (servers.isNotEmpty()) out.add(ep to servers)
+            val block = m.groupValues[2].take(3000)
+            val hubs = Regex(
+                """https?://(?:www\.)?hubcloud\.[a-z]+/drive/[a-zA-Z0-9]+""",
+                RegexOption.IGNORE_CASE
+            ).findAll(block).map { it.value }.distinct().toList()
+            val gds = Regex(
+                """https?://(?:new\d+\.)?gdflix\.[a-z]+/file/[a-zA-Z0-9]+""",
+                RegexOption.IGNORE_CASE
+            ).findAll(block).map { it.value }.distinct().toList()
+            when {
+                hubs.isNotEmpty() -> out.add(Triple(ep, hubs.first(), hubs.drop(1) + gds))
+                gds.isNotEmpty() -> out.add(Triple(ep, gds.first(), gds.drop(1)))
+            }
         }
         return out
-    }
-
-    private fun extractServers(block: String): List<Pair<String, String>> {
-        val servers = ArrayList<Pair<String, String>>()
-        val seen = HashSet<String>()
-
-        // HubCloud
-        for (m in Regex(
-            """https?://(?:www\.)?hubcloud\.[a-z]+/drive/[a-zA-Z0-9]+""",
-            RegexOption.IGNORE_CASE
-        ).findAll(block)) {
-            val u = m.value
-            if (seen.add(u)) servers.add("HubCloud" to u)
-        }
-
-        // GDFlix
-        for (m in Regex(
-            """https?://(?:new\d+\.)?gdflix\.[a-z]+/file/[a-zA-Z0-9]+""",
-            RegexOption.IGNORE_CASE
-        ).findAll(block)) {
-            val u = m.value
-            if (seen.add(u)) servers.add("GDFlix" to u)
-        }
-
-        // DriveHub
-        for (m in Regex(
-            """https?://(?:new\d+\.)?drivehub\.[a-z]+/[^\s"']+""",
-            RegexOption.IGNORE_CASE
-        ).findAll(block)) {
-            val u = m.value.trimEnd('/', '"', '\'')
-            if (seen.add(u)) servers.add("DriveHub" to u)
-        }
-
-        // HubDrive
-        for (m in Regex(
-            """https?://hubdrive\.[a-z]+/[^\s"']+""",
-            RegexOption.IGNORE_CASE
-        ).findAll(block)) {
-            val u = m.value.trimEnd('/', '"', '\'')
-            if (seen.add(u)) servers.add("HubDrive" to u)
-        }
-
-        return servers
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -285,38 +251,36 @@ class KDramasMazaProvider : MainAPI() {
         val episodes = ArrayList<Episode>()
         val seen = HashSet<Int>()
 
-        // Try ALL archives (wise first). Merge episodes, don't stop early on weak pages.
         for (archUrl in archives) {
             try {
                 val archHtml = app.get(archUrl, headers = hdr(url)).text
-                val parsed = parseEpisodes(archHtml)
-                for ((epNum, servers) in parsed) {
+                for ((epNum, primary, extras) in parseEpisodes(archHtml)) {
                     if (!seen.add(epNum)) continue
-                    val sorted = servers.sortedBy { s ->
-                        when {
-                            s.second.contains("hubcloud", true) -> 0
-                            s.second.contains("gdflix", true) -> 1
-                            else -> 2
-                        }
+                    // data = primary URL only (hubcloud or gdflix) — clean, no || encoding issues
+                    // extras stored after \n for optional secondary resolve
+                    val dataStr = if (extras.isEmpty()) {
+                        primary
+                    } else {
+                        primary + "\n" + extras.joinToString("\n")
                     }
-                    val payload = sorted.joinToString("||") { it.first + "::" + it.second }
-                    episodes += newEpisode(payload) {
+                    episodes += newEpisode(primary) {
                         this.name = "Episode " + epNum
                         this.episode = epNum
-                        this.data = payload
+                        this.data = dataStr
                     }
                 }
             } catch (_: Exception) {
             }
+            // Prefer first archive that actually has episodes (wise sorted first)
+            if (episodes.isNotEmpty()) break
         }
 
         if (episodes.isEmpty()) {
-            // last resort: store first archive URL so loadLinks can re-parse
-            val fallback = archives.firstOrNull() ?: url
-            episodes += newEpisode(fallback) {
+            val fb = archives.firstOrNull() ?: url
+            episodes += newEpisode(fb) {
                 this.name = "Episode 1"
                 this.episode = 1
-                this.data = fallback
+                this.data = fb
             }
         }
 
@@ -329,46 +293,43 @@ class KDramasMazaProvider : MainAPI() {
         }
     }
 
-    /** HubCloud → gamerxyt → R2 direct (playable) */
-    private suspend fun resolveHubCloud(driveUrl: String): String? {
-        return try {
+    private suspend fun resolveHubCloud(driveUrl: String): List<String> {
+        val results = ArrayList<String>()
+        try {
             val page = app.get(driveUrl, headers = hdr("https://kdramasmaza.com.pk/")).text
 
-            val gen = Regex(
-                """(https?://gamerxyt\.com/hubcloud\.php\?[^"'\s>]+)""",
+            val genLinks = Regex(
+                """(https?://(?:gamerxyt\.com|[^"'\s>]+)/hubcloud\.php\?[^"'\s>]+)""",
                 RegexOption.IGNORE_CASE
-            ).find(page)?.groupValues?.getOrNull(1)?.replace("&amp;", "&")
-                ?: Regex(
-                    """(https?://[^"'\s>]*hubcloud\.php\?[^"'\s>]+)""",
-                    RegexOption.IGNORE_CASE
-                ).find(page)?.groupValues?.getOrNull(1)?.replace("&amp;", "&")
-                ?: return null
+            ).findAll(page).map { it.groupValues[1].replace("&amp;", "&") }.distinct().toList()
 
-            val genHtml = app.get(gen, headers = hdr(driveUrl)).text
+            for (gen in genLinks.take(2)) {
+                try {
+                    val genHtml = app.get(gen, headers = hdr(driveUrl)).text
 
-            val r2 = Regex(
-                """(https://[a-z0-9]+\.r2\.cloudflarestorage\.com/[^"'\s>]+)""",
-                RegexOption.IGNORE_CASE
-            ).find(genHtml)?.groupValues?.getOrNull(1)?.replace("&amp;", "&")
-            if (r2 != null) return r2
+                    // R2 signed URL (works with Range GET)
+                    for (m in Regex(
+                        """(https://[a-z0-9]+\.r2\.cloudflarestorage\.com/[^"'\s>]+)""",
+                        RegexOption.IGNORE_CASE
+                    ).findAll(genHtml)) {
+                        val u = m.groupValues[1].replace("&amp;", "&")
+                        if (u !in results) results.add(u)
+                    }
 
-            val pixel = Regex(
-                """(https://pixel\.hubcloud\.[a-z]+/\?id=[^"'\s>]+)""",
-                RegexOption.IGNORE_CASE
-            ).find(genHtml)?.groupValues?.getOrNull(1)?.replace("&amp;", "&")
-            if (pixel != null) return pixel
-
-            // pixeldrain
-            val pd = Regex(
-                """(https://pixeldrain\.[a-z]+/u/[a-zA-Z0-9]+)""",
-                RegexOption.IGNORE_CASE
-            ).find(genHtml)?.groupValues?.getOrNull(1)
-            if (pd != null) return pd
-
-            null
+                    // pixel.hubcloud
+                    for (m in Regex(
+                        """(https://pixel\.hubcloud\.[a-z]+/\?id=[^"'\s>]+)""",
+                        RegexOption.IGNORE_CASE
+                    ).findAll(genHtml)) {
+                        val u = m.groupValues[1].replace("&amp;", "&")
+                        if (u !in results) results.add(u)
+                    }
+                } catch (_: Exception) {
+                }
+            }
         } catch (_: Exception) {
-            null
         }
+        return results
     }
 
     override suspend fun loadLinks(
@@ -377,84 +338,85 @@ class KDramasMazaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val servers = ArrayList<Pair<String, String>>()
+        val links = data.split("\n").map { it.trim() }.filter { it.startsWith("http") }
+        val toResolve = ArrayList<String>()
 
-        for (p in data.split("||")) {
-            val part = p.trim()
-            if (part.isEmpty()) continue
-            if ("::" in part) {
-                val label = part.substringBefore("::").trim()
-                val link = part.substringAfter("::").trim()
-                if (link.startsWith("http")) servers.add(label to link)
-            } else if (part.startsWith("http")) {
-                servers.add("Server" to part)
-            }
+        if (links.isNotEmpty()) {
+            toResolve.addAll(links)
+        } else if (data.startsWith("http")) {
+            toResolve.add(data)
         }
 
-        // data is drama page or archive page
-        if (servers.isEmpty() && data.startsWith("http")) {
-            try {
-                val html = app.get(data, headers = hdr()).text
-                if (data.contains("/archives/")) {
-                    for ((_, list) in parseEpisodes(html)) {
-                        servers.addAll(list)
-                    }
-                } else {
-                    for (arch in findArchiveLinks(html)) {
-                        val archHtml = app.get(arch, headers = hdr(data)).text
-                        for ((_, list) in parseEpisodes(archHtml)) {
-                            servers.addAll(list)
+        // If data is drama/archive page, parse servers
+        if (toResolve.size == 1) {
+            val only = toResolve[0]
+            if (only.contains("kdramasmaza")) {
+                toResolve.clear()
+                try {
+                    val html = app.get(only, headers = hdr()).text
+                    if (only.contains("/archives/")) {
+                        for ((_, primary, extras) in parseEpisodes(html)) {
+                            toResolve.add(primary)
+                            toResolve.addAll(extras)
                         }
-                        if (servers.isNotEmpty()) break
+                    } else {
+                        for (arch in findArchiveLinks(html)) {
+                            val archHtml = app.get(arch, headers = hdr(only)).text
+                            for ((_, primary, extras) in parseEpisodes(archHtml)) {
+                                toResolve.add(primary)
+                                toResolve.addAll(extras)
+                            }
+                            if (toResolve.isNotEmpty()) break
+                        }
                     }
+                } catch (_: Exception) {
                 }
-            } catch (_: Exception) {
             }
         }
 
-        if (servers.isEmpty()) return false
+        if (toResolve.isEmpty()) return false
 
         var found = false
         val tried = HashSet<String>()
 
-        // HubCloud first
-        for ((label, link) in servers) {
-            if (!link.contains("hubcloud", true)) continue
+        for (link in toResolve) {
             if (!tried.add(link)) continue
-            try {
-                val direct = resolveHubCloud(link)
-                if (direct != null) {
-                    callback(
-                        ExtractorLink(
-                            name,
-                            (label.ifBlank { "HubCloud" }) + " • R2",
-                            direct,
-                            "https://hubcloud.cx/",
-                            Qualities.P720.value,
-                            false
-                        )
-                    )
-                    found = true
-                }
-            } catch (_: Exception) {
-            }
-            try {
-                if (loadExtractor(link, "https://hubcloud.cx/", subtitleCallback, callback)) {
-                    found = true
-                }
-            } catch (_: Exception) {
-            }
-        }
 
-        // GDFlix / others via extractor
-        for ((_, link) in servers) {
-            if (link.contains("hubcloud", true)) continue
-            if (!tried.add(link)) continue
-            try {
-                if (loadExtractor(link, mainUrl, subtitleCallback, callback)) {
-                    found = true
+            if (link.contains("hubcloud", true)) {
+                // 1) Custom R2 resolve
+                try {
+                    val directs = resolveHubCloud(link)
+                    for ((i, direct) in directs.withIndex()) {
+                        callback(
+                            ExtractorLink(
+                                name,
+                                if (i == 0) "HubCloud R2" else "HubCloud Alt " + (i + 1),
+                                direct,
+                                "https://hubcloud.cx/",
+                                Qualities.P720.value,
+                                false
+                            )
+                        )
+                        found = true
+                    }
+                } catch (_: Exception) {
                 }
-            } catch (_: Exception) {
+
+                // 2) Built-in HubCloud extractor
+                try {
+                    if (loadExtractor(link, "https://hubcloud.cx/", subtitleCallback, callback)) {
+                        found = true
+                    }
+                } catch (_: Exception) {
+                }
+            } else {
+                // GDFlix / others
+                try {
+                    if (loadExtractor(link, mainUrl, subtitleCallback, callback)) {
+                        found = true
+                    }
+                } catch (_: Exception) {
+                }
             }
         }
 
