@@ -141,10 +141,18 @@ class CineFreakProvider : MainAPI() {
     override val mainPage = mainPageOf(
         mainUrl + "/" to "Latest",
         mainUrl + "/dual-audio/" to "Dual Audio",
-        mainUrl + "/category/movies/" to "Movies",
         mainUrl + "/web-series/" to "WEB-Series",
-        mainUrl + "/category/hindi/" to "Hindi",
-        mainUrl + "/category/bangla/" to "Bangla"
+        mainUrl + "/hindi-movies/" to "Hindi Movies",
+        mainUrl + "/hindi-dubbed-movies/" to "Hindi Dubbed",
+        mainUrl + "/bangla-movies/" to "Bangla Movies",
+        mainUrl + "/bangla-dubbed/" to "Bangla Dubbed",
+        mainUrl + "/english-movies/" to "English Movies",
+        mainUrl + "/animation/" to "Animation",
+        mainUrl + "/k-drama/" to "K-Drama",
+        mainUrl + "/korean/" to "Korean",
+        mainUrl + "/tamil/" to "Tamil",
+        mainUrl + "/telugu/" to "Telugu",
+        mainUrl + "/horror/" to "Horror"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
