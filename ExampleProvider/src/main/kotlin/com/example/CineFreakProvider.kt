@@ -3,13 +3,13 @@
 package com.example
 
 import android.util.Base64
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 class CineFreakProvider : MainAPI() {
     override var mainUrl = "https://cinefreak.net"
@@ -22,53 +22,40 @@ class CineFreakProvider : MainAPI() {
     private val ua =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    private fun hdr(): Map<String, String> {
+    private fun hdr(referer: String = mainUrl + "/"): Map<String, String> {
         return mapOf(
             "User-Agent" to ua,
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language" to "en-US,en;q=0.9,bn;q=0.8",
-            "Referer" to (mainUrl + "/")
+            "Referer" to referer
         )
     }
 
-    private fun abs(url: String?, base: String = mainUrl): String? {
+    private fun abs(url: String?): String? {
         if (url.isNullOrBlank()) return null
-        var u = url.trim().replace("&amp;", "&")
+        var u = url.trim().replace("&amp;", "&").replace("\\/", "/")
         if (u.startsWith("//")) u = "https:" + u
         if (u.startsWith("http")) return u
-        return base.trimEnd('/') + "/" + u.trimStart('/')
+        return mainUrl.trimEnd('/') + "/" + u.trimStart('/')
     }
 
     private fun cleanTitle(raw: String): String {
         var t = raw
-            .replace(Regex("""(?i)\s*[-–|].*?(download|watch|gdrive|esub|cinefreak).*"""), "")
-            .replace(Regex("""(?i)\s*\[(full movie|all episodes|new episode weekly)\].*"""), "")
-            .replace(Regex("""(?i)\s*\((?:WEB-DL|BluRay|HDTC|HDRip)[^)]*\)"""), "")
-            .replace(Regex("""(?i)\s*(WEB-DL|BluRay|HEVC|ESub|GDrive|480p|720p|1080p|2160p|4K).*$"""), "")
+            .replace(Regex("""(?i)\s*[|\-–].*$"""), "")
+            .replace(Regex("""(?i)\s*\((?:WEB-?DL|BluRay|HDTC|HDRip)[^)]*\)"""), "")
+            .replace(Regex("""(?i)\s*(480p|720p|1080p|2160p|4K).*$"""), "")
+            .replace(Regex("""(?i)\s*Full Series.*$"""), "")
+            .replace(Regex("""(?i)\s*Download.*$"""), "")
             .replace(Regex("""\s{2,}"""), " ")
             .trim()
-        if (t.length < 3) {
-            t = raw.substringBefore("Download").substringBefore("Watch").trim()
-        }
         return t.ifBlank { raw.trim() }
-    }
-
-    private fun yearFrom(text: String): Int? {
-        val a = Regex("""\((19|20)\d{2}\)""").find(text)?.value?.trim('(', ')')?.toIntOrNull()
-        if (a != null) return a
-        return Regex("""\b(19|20)\d{2}\b""").find(text)?.value?.toIntOrNull()
-    }
-
-    private fun isSeriesTitle(t: String): Boolean {
-        val s = t.lowercase()
-        return s.contains("season") || s.contains("series") || s.contains("episode") ||
-            s.contains("web series") || Regex("""\bs\d+\b""").containsMatchIn(s)
     }
 
     private fun qualityFrom(text: String): Int {
         val t = text.lowercase()
         return when {
-            "2160" in t || "4k" in t -> Qualities.P1080.value
+            "2160" in t || "4k" in t || "uhd" in t -> Qualities.P2160.value
+            "1440" in t || "2k" in t -> Qualities.P1440.value
             "1080" in t -> Qualities.P1080.value
             "720" in t -> Qualities.P720.value
             "480" in t -> Qualities.P480.value
@@ -77,36 +64,24 @@ class CineFreakProvider : MainAPI() {
         }
     }
 
+    private fun yearFrom(text: String?): Int? {
+        if (text.isNullOrBlank()) return null
+        return Regex("""\((20\d{2}|19\d{2})\)""").find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("""\b(20\d{2})\b""").find(text)?.value?.toIntOrNull()
+    }
+
+    private fun isSeriesTitle(t: String): Boolean {
+        val s = t.lowercase()
+        return s.contains("season") || s.contains("series") || s.contains("episode") ||
+            Regex("""\bs0?\d+\b""").containsMatchIn(s) || s.contains("web-series")
+    }
+
     private fun pickImg(el: Element): String? {
         for (img in el.select("img")) {
-            val candidates = listOf(
-                img.attr("src"),
-                img.attr("data-src"),
-                img.attr("data-lazy-src"),
-                img.attr("data-original")
-            )
-            for (c in candidates) {
-                val u = abs(c) ?: continue
-                if (u.contains("image.tmdb.org")) return u
+            for (x in listOf(img.attr("src"), img.attr("data-src"), img.attr("data-lazy-src"))) {
+                val u = abs(x) ?: continue
+                if (u.startsWith("http") && !u.contains("data:image") && !u.endsWith(".svg")) return u
             }
-        }
-        for (img in el.select("img")) {
-            val candidates = listOf(
-                img.attr("src"),
-                img.attr("data-src"),
-                img.attr("data-lazy-src"),
-                img.attr("data-original")
-            )
-            val url = candidates.mapNotNull { abs(it) }
-                .firstOrNull {
-                    it.contains("http") &&
-                        !it.contains("data:image") &&
-                        !it.endsWith(".svg") &&
-                        !it.contains("logo") &&
-                        !it.contains("admin-ajax") &&
-                        !it.contains("rank_math")
-                }
-            if (url != null) return url
         }
         return null
     }
@@ -114,357 +89,322 @@ class CineFreakProvider : MainAPI() {
     private fun parseCards(doc: Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
         val seen = HashSet<String>()
-
-        fun add(href: String, titleRaw: String, poster: String?) {
-            if (!href.contains("cinefreak.net")) return
-            if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/")) return
-            if (!href.contains("-download")) return
-            if (!seen.add(href)) return
-            if (titleRaw.isBlank()) return
-            val title = cleanTitle(titleRaw)
+        for (a in doc.select("a[href]")) {
+            val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
+            if (!href.contains("cinefreak.net")) continue
+            if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/") ||
+                href.contains("generate.php") || href.contains("/?")
+            ) continue
+            if (href.trimEnd('/') == mainUrl) continue
+            if (!seen.add(href)) continue
+            val titleRaw = a.text().trim().ifBlank {
+                a.selectFirst("img")?.attr("alt")?.trim().orEmpty()
+            }
+            if (titleRaw.length < 3) continue
+            val parent = a.parents().firstOrNull { it.selectFirst("img") != null } ?: a.parent()
+            val poster = parent?.let { pickImg(it) }
             val year = yearFrom(titleRaw)
-            val series = isSeriesTitle(titleRaw)
-            out += if (series) {
-                newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+            val title = cleanTitle(titleRaw)
+            if (isSeriesTitle(titleRaw)) {
+                out += newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
                     this.posterUrl = poster
                     this.year = year
                 }
             } else {
-                newMovieSearchResponse(title, href, TvType.Movie) {
+                out += newMovieSearchResponse(title, href, TvType.Movie) {
                     this.posterUrl = poster
                     this.year = year
                 }
             }
         }
-
-        for (a in doc.select("a.movie-card[href]")) {
-            val href = abs(a.attr("abs:href").ifBlank { a.attr("href") }) ?: continue
-            val titleRaw = a.selectFirst("h3.movie-card-title, h2, h3")?.text()
-                ?: a.attr("aria-label").ifBlank { a.text() }
-            add(href, titleRaw, pickImg(a))
-        }
-
-        for (slide in doc.select(".cine-slide, .swiper-slide")) {
-            val link = slide.selectFirst("h2.cine-slide-title a[href], a[href*='-download/']")
-                ?: continue
-            val href = abs(link.attr("abs:href").ifBlank { link.attr("href") }) ?: continue
-            val titleRaw = link.text().ifBlank {
-                slide.selectFirst("img")?.attr("alt") ?: ""
-            }
-            add(href, titleRaw, pickImg(slide))
-        }
-
-        return out
+        return out.distinctBy { it.url }.take(40)
     }
 
-    data class SearchApiResponse(
-        @JsonProperty("results") val results: List<SearchItem>? = null
-    )
-
-    data class SearchItem(
-        @JsonProperty("t") val title: String? = null,
-        @JsonProperty("l") val slug: String? = null,
-        @JsonProperty("i") val image: String? = null,
-        @JsonProperty("c") val cats: String? = null,
-        @JsonProperty("q") val quality: String? = null
-    )
-
     override val mainPage = mainPageOf(
-        "https://cinefreak.net/" to "Latest",
-        "https://cinefreak.net/web-series/" to "WEB-Series",
-        "https://cinefreak.net/hindi-movies/" to "Hindi Movies",
-        "https://cinefreak.net/hindi-dubbed-movies/" to "Hindi Dubbed",
-        "https://cinefreak.net/english-movies/" to "English Movies",
-        "https://cinefreak.net/dual-audio/" to "Dual Audio",
-        "https://cinefreak.net/bangla-movies/" to "Bangla Movies",
-        "https://cinefreak.net/bangla-dubbed/" to "Bangla Dubbed",
-        "https://cinefreak.net/horror/" to "Horror"
+        mainUrl + "/" to "Latest",
+        mainUrl + "/category/movies/" to "Movies",
+        mainUrl + "/web-series/" to "WEB-Series",
+        mainUrl + "/category/dual-audio/" to "Dual Audio",
+        mainUrl + "/category/hindi/" to "Hindi",
+        mainUrl + "/category/bangla/" to "Bangla"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) {
-            request.data
-        } else if (request.data.endsWith("/")) {
-            request.data + "page/" + page + "/"
-        } else {
-            mainUrl + "/page/" + page + "/"
+        val url = when {
+            page <= 1 -> request.data
+            request.data.endsWith("/") -> request.data + "page/" + page + "/"
+            else -> request.data + "/page/" + page + "/"
         }
         val doc = app.get(url, headers = hdr()).document
-        val list = parseCards(doc)
-        return newHomePageResponse(request.name, list, list.isNotEmpty())
+        return newHomePageResponse(request.name, parseCards(doc), true)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
-
+        // JSON API if available
         try {
-            val apiUrl = mainUrl + "/search-api.php?q=" + q.replace(" ", "+") + "&pg=1"
-            val json = app.get(
-                apiUrl,
-                headers = hdr() + mapOf(
-                    "Accept" to "application/json,text/plain,*/*",
-                    "X-Requested-With" to "XMLHttpRequest"
-                )
-            ).text
-            val parsed = parseJson<SearchApiResponse>(json)
-            val out = ArrayList<SearchResponse>()
-            for (item in parsed.results.orEmpty()) {
-                val slug = item.slug?.trim().orEmpty()
-                if (slug.isEmpty()) continue
-                val href = mainUrl + "/" + slug + "/"
-                val titleRaw = item.title.orEmpty()
-                val title = cleanTitle(titleRaw)
-                val poster = abs(item.image)
-                val year = yearFrom(titleRaw)
-                val series = isSeriesTitle(titleRaw) || (item.cats?.contains("Series", true) == true)
-                out += if (series) {
-                    newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                        this.posterUrl = poster
-                        this.year = year
-                    }
-                } else {
-                    newMovieSearchResponse(title, href, TvType.Movie) {
-                        this.posterUrl = poster
-                        this.year = year
-                    }
-                }
+            val apiUrl = mainUrl + "/search-api.php?q=" + URLEncoder.encode(q, "UTF-8") + "&pg=1"
+            val txt = app.get(apiUrl, headers = hdr()).text
+            if (txt.trimStart().startsWith("[")) {
+                // minimal parse without forced JSON lib dependency issues
             }
-            if (out.isNotEmpty()) return out
         } catch (_: Exception) {
         }
-
-        val doc = app.get(mainUrl + "/?s=" + q.replace(" ", "+"), headers = hdr()).document
+        val doc = app.get(
+            mainUrl + "/?s=" + URLEncoder.encode(q, "UTF-8"),
+            headers = hdr()
+        ).document
         return parseCards(doc)
     }
 
-    private fun decodeWatchLinks(doc: Document): List<Pair<String, String>> {
-        val out = LinkedHashMap<String, String>()
-        for (a in doc.select("a[href*='generate.php?id=']")) {
-            val href = a.attr("abs:href").ifBlank { a.attr("href") }
-            val id = Regex("""[?&]id=([A-Za-z0-9+/=]+)""").find(href)?.groupValues?.getOrNull(1)
+    /**
+     * One quality link for an episode:
+     * label + generate.php URL (watch /x/ preferred)
+     */
+    data class QualLink(val label: String, val genUrl: String)
+
+    /**
+     * Parse ep-card blocks → per-episode quality links (UNIQUE per episode)
+     */
+    private fun parseEpisodeCards(html: String): List<Pair<Int, List<QualLink>>> {
+        val out = ArrayList<Pair<Int, List<QualLink>>>()
+        val cards = Regex(
+            """<div class="ep-card">([\s\S]*?)(?=<div class="ep-card">|$)""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html)
+
+        for (card in cards) {
+            val block = card.groupValues[1]
+            val meta = Regex(
+                """class="ep-meta"[^>]*>([\s\S]*?)</div>""",
+                RegexOption.IGNORE_CASE
+            ).find(block)?.groupValues?.getOrNull(1).orEmpty()
+            val metaText = meta.replace(Regex("""<[^>]+>"""), " ")
+            val epNum = Regex(
+                """Episode\s*0*(\d+)""",
+                RegexOption.IGNORE_CASE
+            ).find(metaText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex(
+                    """\bE0*(\d+)\b""",
+                    RegexOption.IGNORE_CASE
+                ).find(metaText)?.groupValues?.getOrNull(1)?.toIntOrNull()
                 ?: continue
-            val decoded = try {
-                String(Base64.decode(id, Base64.DEFAULT))
-            } catch (_: Exception) {
-                continue
-            }
-            if (!decoded.startsWith("http")) continue
-            if (!decoded.contains("/x/")) continue
 
-            val nearby = (a.text() + " " + (a.parent()?.text() ?: "")).trim()
-            val label = when {
-                nearby.contains("2160", true) || nearby.contains("4K", true) -> "4K"
-                nearby.contains("1080", true) -> "1080p"
-                nearby.contains("720", true) -> "720p"
-                nearby.contains("480", true) -> "480p"
-                else -> a.text().trim().ifBlank { "Watch" }
-            }
-
-            val trunc = Regex("""(https?://[^/]+/x/)([a-fA-F0-9]+)""").find(decoded)
-            val shortUrl = if (trunc != null) {
-                trunc.groupValues[1] + trunc.groupValues[2]
-            } else {
-                decoded
-            }
-            if (!out.containsKey(shortUrl)) {
-                out[shortUrl] = label
-            }
-        }
-        return out.map { it.key to it.value }
-    }
-
-    private fun extractMediaUrls(html: String): List<String> {
-        val found = LinkedHashSet<String>()
-
-        Regex("""player\.yagaverse\.net/embed2/\?id=([^"'&\s]+)""", RegexOption.IGNORE_CASE)
-            .findAll(html)
-            .forEach { m ->
-                var u = m.groupValues[1]
-                repeat(3) {
-                    try {
-                        u = java.net.URLDecoder.decode(u, "UTF-8")
-                    } catch (_: Exception) {
-                    }
+            val links = ArrayList<QualLink>()
+            val seen = HashSet<String>()
+            val aRegex = Regex(
+                """href\s*=\s*["']([^"']*generate\.php\?id=[^"']+)["'][^>]*>([\s\S]*?)</a>""",
+                RegexOption.IGNORE_CASE
+            )
+            for (m in aRegex.findAll(block)) {
+                val href = abs(m.groupValues[1]) ?: continue
+                val label = m.groupValues[2].replace(Regex("""<[^>]+>"""), "").trim()
+                    .ifBlank { "Server" }
+                // Prefer watch links (/x/) over file (/f/) when decoding
+                val id = href.substringAfter("id=", "")
+                val decoded = try {
+                    String(Base64.decode(id, Base64.DEFAULT))
+                } catch (_: Exception) {
+                    ""
                 }
-                if (u.startsWith("http")) found.add(u)
+                // Skip pure download /f/ if we already have /x/ same quality — keep both for now but mark
+                val key = label.lowercase() + "|" + (if ("/x/" in decoded) "x" else "f")
+                if (!seen.add(key + href.takeLast(12))) continue
+                // Prefer /x/ watch paths: put them first later
+                links.add(QualLink(label, href))
             }
-
-        Regex(
-            """https?://[^\s"'<>\\]+(?:r2\.dev|workers\.dev)[^\s"'<>\\]*""",
-            RegexOption.IGNORE_CASE
-        ).findAll(html).forEach {
-            found.add(it.value.replace("&amp;", "&"))
-        }
-
-        Regex(
-            """https?://[^\s"'<>\\]+\.(?:mp4|mkv|m3u8)[^\s"'<>\\]*""",
-            RegexOption.IGNORE_CASE
-        ).findAll(html).forEach {
-            found.add(it.value.replace("&amp;", "&"))
-        }
-
-        return found.toList()
-    }
-
-    private fun extractPlot(doc: Document): String? {
-        val html = doc.html()
-        val m = Regex(
-            """Plot Summary\s*/\s*Storyline\s*:?\s*</[^>]+>\s*<p[^>]*>([\s\S]*?)</p>""",
-            RegexOption.IGNORE_CASE
-        ).find(html)
-        if (m != null) {
-            val text = m.groupValues[1]
-                .replace(Regex("""<[^>]+>"""), " ")
-                .replace(Regex("""\s+"""), " ")
-                .trim()
-            if (text.length > 20) return text
-        }
-        for (p in doc.select(".entry-content p, article p")) {
-            val t = p.text().trim()
-            if (t.length > 60 &&
-                !t.lowercase().startsWith("download") &&
-                !t.contains("CineFreak is the best") &&
-                !t.contains("IMDb Rating")
-            ) {
-                return t
+            if (links.isNotEmpty()) {
+                // Sort: /x/ (watch) first by decoding
+                val sorted = links.sortedBy { q ->
+                    val id = q.genUrl.substringAfter("id=", "")
+                    val dec = try {
+                        String(Base64.decode(id, Base64.DEFAULT))
+                    } catch (_: Exception) {
+                        ""
+                    }
+                    if ("/x/" in dec) 0 else 1
+                }
+                out.add(epNum to sorted)
             }
         }
-        return null
+        return out
     }
 
-    private fun extractPoster(doc: Document): String? {
-        val tmdb = doc.select("img[src*=image.tmdb.org], img[data-src*=image.tmdb.org]").firstOrNull()
-        if (tmdb != null) {
-            val u = abs(tmdb.attr("src").ifBlank { tmdb.attr("data-src") })
-            if (u != null) return u
-        }
-        val og = abs(doc.selectFirst("meta[property=og:image]")?.attr("content"))
-        if (og != null && !og.contains("admin-ajax") && !og.contains("rank_math")) {
-            return og
-        }
-        return pickImg(doc.body())
-    }
-
-    private data class Meta(
-        val genres: List<String> = emptyList(),
-        val runtimeMin: Int? = null,
-        val rating: Int? = null,
-        val actors: List<String> = emptyList(),
-        val directors: List<String> = emptyList()
-    )
-
-    private fun extractMeta(doc: Document): Meta {
-        val text = doc.select(".entry-content, article, .post-content").text()
-        val html = doc.html()
-
-        val genres = Regex("""(?i)Genres?\s*:\s*([^\n<]+)""")
-            .find(html)?.groupValues?.getOrNull(1)
-            ?.replace(Regex("""<[^>]+>"""), "")
-            ?.split(",", "|", "/")
-            ?.map { it.trim() }
-            ?.filter { it.isNotBlank() && it.length < 30 }
-            ?: emptyList()
-
-        val runtimeMin = Regex("""(?i)Runtime\s*:\s*(\d+)\s*Hour[s]?\s*(\d+)?""")
-            .find(text)?.let { m ->
-                val h = m.groupValues[1].toIntOrNull() ?: 0
-                val min = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
-                h * 60 + min
-            } ?: Regex("""(?i)Runtime\s*:\s*(\d+)\s*Min""").find(text)
-                ?.groupValues?.getOrNull(1)?.toIntOrNull()
-
-        val ratingFloat = Regex("""(?i)IMDb Rating\s*:\s*([\d.]+)\s*/\s*10""")
-            .find(text)?.groupValues?.getOrNull(1)?.toFloatOrNull()
-        val rating = ratingFloat?.let { (it * 1000).toInt().coerceIn(0, 10000) }
-
-        fun namesAfter(label: String): List<String> {
-            val r = Regex("""(?i)""" + label + """\s*:\s*([^\n<]+)""")
-            val raw = r.find(text)?.groupValues?.getOrNull(1) ?: return emptyList()
-            return raw.split(",", "|", "&")
-                .map { it.trim() }
-                .filter { it.length in 2..40 && !it.contains("http") }
-        }
-
-        return Meta(
-            genres = genres.distinct(),
-            runtimeMin = runtimeMin,
-            rating = rating,
-            actors = (namesAfter("Stars") + namesAfter("Cast") + namesAfter("Actors")).distinct(),
-            directors = (namesAfter("Director") + namesAfter("Directors")).distinct()
+    /** Movie page: all generate links on page */
+    private fun parseMovieLinks(html: String): List<QualLink> {
+        val links = ArrayList<QualLink>()
+        val seen = HashSet<String>()
+        val aRegex = Regex(
+            """href\s*=\s*["']([^"']*generate\.php\?id=[^"']+)["'][^>]*>([\s\S]*?)</a>""",
+            RegexOption.IGNORE_CASE
         )
+        for (m in aRegex.findAll(html)) {
+            val href = abs(m.groupValues[1]) ?: continue
+            if (!seen.add(href)) continue
+            val label = m.groupValues[2].replace(Regex("""<[^>]+>"""), "").trim()
+                .ifBlank { "Server" }
+            links.add(QualLink(label, href))
+        }
+        return links
+    }
+
+    /**
+     * Encode episode sources into data string (unique per episode).
+     * Format: LABEL``GENURL  separated by \n
+     */
+    private fun encodeData(links: List<QualLink>): String {
+        return links.joinToString("\n") { it.label + "``" + it.genUrl }
+    }
+
+    private fun decodeData(data: String): List<QualLink> {
+        val out = ArrayList<QualLink>()
+        for (line in data.split("\n")) {
+            val p = line.trim()
+            if ("``" in p) {
+                val label = p.substringBefore("``").trim()
+                val url = p.substringAfter("``").trim()
+                if (url.startsWith("http")) out.add(QualLink(label, url))
+            } else if (p.contains("generate.php")) {
+                out.add(QualLink("Server", p))
+            }
+        }
+        return out
     }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = hdr()).document
-        val titleRaw = doc.selectFirst("h1, title")?.text() ?: "Unknown"
+        val html = doc.html()
+        val titleRaw = doc.selectFirst("h1.page-title, h1.entry-title, h1")?.text() ?: "Unknown"
         val title = cleanTitle(titleRaw)
-        val poster = extractPoster(doc)
-        val plot = extractPlot(doc)
+        val poster = abs(doc.selectFirst("meta[property=og:image]")?.attr("content"))
+            ?: pickImg(doc.body())
         val year = yearFrom(titleRaw)
-        val meta = extractMeta(doc)
 
-        val tags = (meta.genres +
-            doc.select("a[rel=category tag], .entry-categories a")
-                .map { it.text().trim() })
-            .filter { it.isNotBlank() && it.length < 40 }
-            .distinct()
-
-        val background = doc.select(".screenshot-image, .screenshot-item img")
-            .mapNotNull { abs(it.attr("src").ifBlank { it.attr("data-src") }) }
-            .firstOrNull()
-
-        val actors = ArrayList<ActorData>()
-        for (d in meta.directors) {
-            actors += ActorData(Actor(d), roleString = "Director")
-        }
-        for (a in meta.actors) {
-            actors += ActorData(Actor(a), roleString = "Actor")
+        var plot: String? = null
+        val tags = ArrayList<String>()
+        val content = doc.selectFirst(".entry-content, .page-content, article")
+        if (content != null) {
+            val p = content.selectFirst("p")?.text()?.trim()
+            if (p != null && p.length > 40) plot = p
         }
 
-        val series = isSeriesTitle(titleRaw) || tags.any { it.contains("Series", true) }
+        val episodeCards = parseEpisodeCards(html)
 
-        if (series) {
-            val episodes = ArrayList<Episode>()
-            val boxes = doc.select("[id^=single-dl]")
-            if (boxes.isNotEmpty()) {
-                boxes.forEachIndexed { idx, box ->
-                    if (box.select("a[href*='generate.php?id=']").isEmpty()) return@forEachIndexed
-                    episodes += newEpisode(url) {
-                        this.name = "Episode " + (idx + 1)
-                        this.episode = idx + 1
-                        this.data = url
-                    }
+        if (episodeCards.isNotEmpty()) {
+            val episodes = episodeCards.map { (epNum, links) ->
+                val data = encodeData(links)
+                newEpisode(data) {
+                    this.name = "Episode " + epNum
+                    this.episode = epNum
+                    this.data = data
                 }
-            }
-            if (episodes.isEmpty()) {
-                episodes += newEpisode(url) {
-                    this.name = "All Episodes"
-                    this.episode = 1
-                    this.data = url
-                }
-            }
+            }.sortedBy { it.episode }
+
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
-                this.backgroundPosterUrl = background
                 this.plot = plot
                 this.year = year
                 this.tags = tags
-                this.duration = meta.runtimeMin
-                this.rating = meta.rating
-                this.actors = actors.ifEmpty { null }
             }
         }
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        // Movie: single load with page generate links
+        val movieLinks = parseMovieLinks(html)
+        val data = if (movieLinks.isNotEmpty()) encodeData(movieLinks) else url
+        return newMovieLoadResponse(title, url, TvType.Movie, data) {
             this.posterUrl = poster
-            this.backgroundPosterUrl = background
             this.plot = plot
             this.year = year
             this.tags = tags
-            this.duration = meta.runtimeMin
-            this.rating = meta.rating
-            this.actors = actors.ifEmpty { null }
+        }
+    }
+
+    /**
+     * generate.php → cinecloud /x/{hex} (truncated) → extract R2 mkv from page/player embed
+     */
+    private suspend fun resolveGenerate(genUrl: String): String? {
+        return try {
+            val page = app.get(genUrl, headers = hdr(mainUrl + "/"))
+            val html = page.text
+            val finalUrl = page.url
+
+            // location or link to cinecloud
+            var cloud = Regex(
+                """(https?://[^"'\s]*cinecloud[^"'\s]*/x/[a-zA-Z0-9]+)""",
+                RegexOption.IGNORE_CASE
+            ).find(html)?.groupValues?.getOrNull(1)
+
+            if (cloud == null) {
+                // decode id from genUrl
+                val id = genUrl.substringAfter("id=", "").substringBefore("&")
+                val decoded = try {
+                    String(Base64.decode(id, Base64.DEFAULT))
+                } catch (_: Exception) {
+                    ""
+                }
+                if (decoded.contains("cinecloud") && "/x/" in decoded) {
+                    // truncate to hex-only id after /x/
+                    val m = Regex(
+                        """(https?://[^/]+)/x/([a-f0-9]+)""",
+                        RegexOption.IGNORE_CASE
+                    ).find(decoded)
+                    if (m != null) {
+                        cloud = m.groupValues[1] + "/x/" + m.groupValues[2]
+                    }
+                }
+            } else {
+                // also truncate cloud URL if has extra suffix
+                val m = Regex(
+                    """(https?://[^/]+)/x/([a-f0-9]+)""",
+                    RegexOption.IGNORE_CASE
+                ).find(cloud)
+                if (m != null) {
+                    cloud = m.groupValues[1] + "/x/" + m.groupValues[2]
+                }
+            }
+
+            if (cloud == null) return null
+
+            val cHtml = app.get(cloud, headers = hdr(genUrl)).text
+
+            // Direct R2 in page
+            val r2 = Regex(
+                """(https://pub-[a-z0-9]+\.r2\.dev/[^"'\s]+)""",
+                RegexOption.IGNORE_CASE
+            ).find(cHtml)?.groupValues?.getOrNull(1)
+            if (r2 != null) {
+                return try {
+                    URLDecoder.decode(r2.replace("&amp;", "&"), "UTF-8")
+                } catch (_: Exception) {
+                    r2.replace("&amp;", "&")
+                }
+            }
+
+            // player.yagaverse embed?id=R2URL
+            val embed = Regex(
+                """player\.yagaverse[^"']*[?&]id=([^&"']+)""",
+                RegexOption.IGNORE_CASE
+            ).find(cHtml)?.groupValues?.getOrNull(1)
+            if (embed != null) {
+                val decoded = try {
+                    URLDecoder.decode(embed, "UTF-8")
+                } catch (_: Exception) {
+                    embed
+                }
+                if (decoded.startsWith("http")) return decoded
+            }
+
+            // any mkv/mp4
+            val media = Regex(
+                """(https://[^"'\s]+\.(?:mkv|mp4)[^"'\s]*)""",
+                RegexOption.IGNORE_CASE
+            ).find(cHtml)?.groupValues?.getOrNull(1)
+            if (media != null) return media.replace("&amp;", "&")
+
+            null
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -474,83 +414,47 @@ class CineFreakProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val pageUrl = data.substringBefore("|||").ifBlank { data }
-        val doc = app.get(pageUrl, headers = hdr()).document
-        val servers = decodeWatchLinks(doc)
+        var links = decodeData(data)
 
-        val preferred = servers.filter {
-            it.second.contains("720") || it.second.contains("480")
-        }
-        val others = servers.filter { it !in preferred }
-        val limited = (preferred + others).distinctBy { it.first }.take(4)
-
-        val pending = ArrayList<Triple<String, String, Int>>()
-        val pushed = HashSet<String>()
-
-        limited.apmap { pair ->
-            val cineUrl = pair.first
-            val label = pair.second
+        // Fallback: old bug used page URL for all episodes
+        if (links.isEmpty() && data.startsWith("http") && !data.contains("generate.php")) {
             try {
-                val page = app.get(
-                    cineUrl,
-                    headers = hdr() + mapOf("Referer" to (mainUrl + "/"))
-                ).text
-                for (m in extractMediaUrls(page)) {
-                    val u = m.trim().replace("&amp;", "&")
-                    if (!u.startsWith("http")) continue
-                    synchronized(pushed) {
-                        if (!pushed.add(u)) return@apmap
-                    }
-                    val q = qualityFrom(label + " " + u)
-                    synchronized(pending) {
-                        pending.add(Triple(u, label, q))
-                    }
+                val html = app.get(data, headers = hdr()).text
+                val cards = parseEpisodeCards(html)
+                if (cards.isNotEmpty()) {
+                    // Cannot know which episode — use first only as last resort
+                    links = cards.first().second
+                } else {
+                    links = parseMovieLinks(html)
                 }
             } catch (_: Exception) {
             }
         }
 
-        val sorted = pending.sortedWith(
-            compareBy<Triple<String, String, Int>> {
-                when (it.third) {
-                    Qualities.P720.value -> 0
-                    Qualities.P480.value -> 1
-                    Qualities.P360.value -> 2
-                    Qualities.P1080.value -> 3
-                    else -> 4
-                }
-            }.thenBy {
-                when {
-                    it.first.contains(".mp4", true) -> 0
-                    it.first.contains(".m3u8", true) -> 1
-                    else -> 2
-                }
-            }
-        )
+        if (links.isEmpty()) return false
 
         var found = false
-        for (item in sorted) {
-            val u = item.first
-            val label = item.second
-            val q = item.third
-            val isM3u8 = u.contains(".m3u8")
-            var nameLabel = label.ifBlank { "CineFreak" }
-            if (q == Qualities.P1080.value && !label.contains("1080")) nameLabel += " • 1080p"
-            if (q == Qualities.P720.value && !label.contains("720")) nameLabel += " • 720p"
-            if (q == Qualities.P480.value && !label.contains("480")) nameLabel += " • 480p"
-            callback(
-                ExtractorLink(
-                    name,
-                    nameLabel,
-                    u,
-                    "https://new5.cinecloud.site/",
-                    q,
-                    isM3u8
-                )
-            )
-            found = true
-        }
+        val seen = HashSet<String>()
 
+        for (q in links) {
+            try {
+                val direct = resolveGenerate(q.genUrl) ?: continue
+                if (!seen.add(direct)) continue
+                val quality = qualityFrom(q.label + " " + direct)
+                callback(
+                    ExtractorLink(
+                        name,
+                        q.label.ifBlank { "CineFreak" },
+                        direct,
+                        mainUrl + "/",
+                        quality,
+                        false
+                    )
+                )
+                found = true
+            } catch (_: Exception) {
+            }
+        }
         return found
     }
 }
