@@ -113,8 +113,9 @@ class HiAnimeProvider : MainAPI() {
         mainUrl + "/most-popular" to "Most Popular",
         mainUrl + "/tv" to "TV Series",
         mainUrl + "/movie" to "Movies",
-        mainUrl + "/completed" to "Completed",
-        mainUrl + "/recently-updated" to "Recently Updated"
+        mainUrl + "/recently-updated" to "Recently Updated",
+        mainUrl + "/latest-completed" to "Completed",
+        mainUrl + "/az-list" to "A-Z List"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
